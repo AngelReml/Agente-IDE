@@ -1,80 +1,190 @@
-# Swarm IDE
+# Swarm IDE v3.0
 
-Multi-agent developer IDE powered by OpenRouter with automatic model fallback.
+IDE multi-agente que escribe código por ti. Describe lo que necesitas en lenguaje natural y el agente analiza el proyecto, crea y edita archivos, ejecuta comandos, hace commit y te informa en tiempo real de cada paso.
 
-## Inicio rápido
+**Sin Docker. Corre directamente en Windows.**
 
-```bash
-docker-compose up --build
+---
+
+## Características principales
+
+- **Multi-proveedor** — chain de 24 modelos en 8 proveedores con fallback automático
+- **Routing inteligente** — modo ⚡ Fast (Groq/GLM, barato y rápido) o 🔥 Power (Anthropic/OpenAI, máxima calidad)
+- **Streaming SSE** — cada acción del agente se muestra en tiempo real
+- **Editor Monaco** — el mismo editor de VS Code, en el navegador
+- **Terminal integrada** — WebSocket PTY nativo (PowerShell en Windows)
+- **Contador de coste** — tokens y USD por ejecución y por sesión
+- **Timeline de backups** — restaura cualquier archivo a cualquier versión anterior
+- **Historial de sesión** — el agente recuerda el contexto entre cambios de modelo
+- **Cambio de proyecto en caliente** — sin reiniciar el backend
+- **Detección de bucles** — avisa si el agente repite la misma acción 3+ veces, aborta a las 6
+
+---
+
+## Inicio rápido (Windows)
+
+```
+1. Doble clic en INSTALAR.bat    ← solo la primera vez
+2. Doble clic en INICIAR.bat     ← abre el IDE
+3. Navega a http://localhost:3000
 ```
 
-Luego abre: http://localhost:3000
+Para parar: doble clic en `PARAR.bat`.
 
-## Uso
+---
 
-1. Escribe tu tarea en la barra superior con toda la precisión posible
-2. Pulsa **Ejecutar** (o Enter)
-3. El swarm analiza, escribe código, instala dependencias, hace commit — sin preguntar
-
-**Ejemplos de tareas:**
-- `Crea una API REST con FastAPI, endpoints CRUD para usuarios, PostgreSQL y tests con pytest`
-- `Añade autenticación JWT a la API existente con refresh tokens`
-- `Refactoriza el módulo de pagos para usar async/await`
-- `Crea un dashboard Next.js con shadcn/ui que consuma esta API`
-
-## Arquitectura
-
-```
-backend/          FastAPI + LangGraph + herramientas git/filesystem
-frontend/         Next.js 15 + Monaco Editor + streaming SSE
-projects/current/ Tu proyecto (montado como volumen Docker)
-```
-
-## Fallback de modelos
-
-El swarm cambia de modelo automáticamente si hay errores de créditos/tokens:
-
-1. `anthropic/claude-sonnet-4-5`
-2. `anthropic/claude-opus-4-5`
-3. `x-ai/grok-3`
-4. `google/gemini-2.5-pro-preview`
-5. `qwen/qwen3-235b-a22b`
-6. `deepseek/deepseek-r1`
-7. `anthropic/claude-haiku-4-5`
-8. `openai/gpt-4o`
-9. `openai/gpt-4o-mini`
-
-Para actualizar la lista edita `backend/app/smart_router.py → MODELS`.
-
-## Atajos de teclado
-
-| Acción | Tecla |
-|--------|-------|
-| Ejecutar tarea | Enter |
-| Guardar archivo | Ctrl+S |
-| Formatear código | Ctrl+Shift+F |
-
-## Variables de entorno (.env)
-
-```env
-OPENROUTER_API_KEY=sk-or-v1-...   # Requerido
-OPENAI_API_KEY=sk-...              # Fallback opcional
-ANTHROPIC_API_KEY=sk-ant-...       # Fallback opcional
-PROJECT_ROOT=/projects/current     # Dónde trabaja el swarm
-```
-
-## Correr localmente (sin Docker)
+## Inicio manual
 
 **Backend:**
 ```bash
 cd backend
 pip install -r requirements.txt
-PROJECT_ROOT=../projects/current uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8000
 ```
 
 **Frontend:**
 ```bash
 cd frontend
 npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
+npm run dev
 ```
+
+---
+
+## Variables de entorno (`.env` en la raíz)
+
+```env
+# ── Proyecto ──────────────────────────────────────────────────────────────────
+PROJECT_ROOT=C:/Users/TU_USUARIO/Desktop/mi-proyecto   # carpeta de trabajo del agente
+
+# ── Proveedores (añade solo los que tengas) ───────────────────────────────────
+ANTHROPIC_API_KEY=sk-ant-...      # Claude Opus/Sonnet/Haiku  ← recomendado
+OPENAI_API_KEY=sk-...             # GPT-4o / GPT-4o Mini
+GROQ_API_KEY=gsk_...              # Llama 3.3 70B (gratis hasta cuota)
+GLM_API_KEY=...                   # GLM-4 Plus/Air/Flash (ZhipuAI)
+GEMINI_API_KEY=AIza...            # Gemini 2.5 Flash/Pro (Google AI Studio)
+DEEPSEEK_API_KEY=sk-...           # DeepSeek V3 / R1
+HF_TOKEN=hf_...                   # Qwen2.5, Llama 3.3 (HuggingFace)
+OPENROUTER_API_KEY=sk-or-v1-...   # acceso a todos los modelos vía OpenRouter
+```
+
+Con al menos **una** clave el IDE funciona. Cada proveedor que añadas amplía el chain de fallback.
+
+---
+
+## Chain de modelos (orden de prioridad)
+
+El agente empieza en el modelo apropiado según el modo de routing y avanza automáticamente si hay error de cuota, rate-limit o saldo insuficiente.
+
+| # | Proveedor | Modelo | Clave env |
+|---|-----------|--------|-----------|
+| 1 | Anthropic | Claude Opus 4.5 | `ANTHROPIC_API_KEY` |
+| 2 | Anthropic | Claude Sonnet 4.5 | `ANTHROPIC_API_KEY` |
+| 3 | Anthropic | Claude Haiku 4.5 | `ANTHROPIC_API_KEY` |
+| 4 | OpenAI | GPT-4o | `OPENAI_API_KEY` |
+| 5 | OpenAI | GPT-4o Mini | `OPENAI_API_KEY` |
+| 6 | Groq | Llama 3.3 70B | `GROQ_API_KEY` |
+| 7 | Groq | Llama 3.1 8B | `GROQ_API_KEY` |
+| 8 | GLM | GLM-4 Plus | `GLM_API_KEY` |
+| 9 | GLM | GLM-4 Air | `GLM_API_KEY` |
+| 10 | GLM | GLM-4 Flash | `GLM_API_KEY` |
+| 11 | Gemini | Gemini 2.5 Flash | `GEMINI_API_KEY` |
+| 12 | Gemini | Gemini 2.5 Pro | `GEMINI_API_KEY` |
+| 13 | Gemini | Gemini 2.0 Flash | `GEMINI_API_KEY` |
+| 14 | DeepSeek | DeepSeek V3 | `DEEPSEEK_API_KEY` |
+| 15 | DeepSeek | DeepSeek R1 | `DEEPSEEK_API_KEY` |
+| 16 | HuggingFace | Qwen2.5 Coder 32B | `HF_TOKEN` |
+| 17 | HuggingFace | Qwen2.5 72B | `HF_TOKEN` |
+| 18 | HuggingFace | Llama 3.3 70B | `HF_TOKEN` |
+| 19 | OpenRouter | Claude Sonnet [OR] | `OPENROUTER_API_KEY` |
+| 20 | OpenRouter | Gemini 2.5 Pro [OR] | `OPENROUTER_API_KEY` |
+| 21 | OpenRouter | Qwen3 235B [OR] | `OPENROUTER_API_KEY` |
+| 22 | OpenRouter | Llama 3.3 Free | `OPENROUTER_API_KEY` |
+| 23 | OpenRouter | Llama 3.2 3B Free | `OPENROUTER_API_KEY` |
+| 24 | OpenRouter | Gemma 3 4B Free | `OPENROUTER_API_KEY` |
+
+---
+
+## Modos de routing
+
+| Modo | Inicio en | Ideal para |
+|------|-----------|-----------|
+| ⚡ **Fast** | Groq → GLM → DeepSeek → HuggingFace | tareas simples, bajo coste |
+| 🔥 **Power** | Anthropic → OpenAI → Gemini | tareas complejas, máxima calidad |
+
+Se cambia con el toggle ⚡/🔥 junto a la caja de texto. El agente avanza automáticamente si el modelo activo falla.
+
+---
+
+## Herramientas del agente
+
+| Herramienta | Descripción |
+|-------------|-------------|
+| `read_file` | Lee cualquier archivo del proyecto |
+| `write_file` | Crea o sobreescribe un archivo |
+| `edit_file` | Edición quirúrgica (sustituye fragmento exacto) |
+| `list_directory` | Lista el contenido de una carpeta |
+| `search_code` | Búsqueda semántica en el proyecto |
+| `run_command` | Ejecuta comandos (pip, npm, pytest…) |
+| `fetch_url` | Descarga contenido de una URL HTTP |
+| `git_*` | Status, add, commit, log |
+
+---
+
+## Atajos de teclado
+
+| Acción | Tecla |
+|--------|-------|
+| Ejecutar tarea | `Enter` |
+| Nueva línea en el input | `Shift+Enter` o `Alt+Enter` |
+| Guardar archivo | `Ctrl+S` |
+| Formatear código | `Ctrl+Shift+F` |
+
+---
+
+## Arquitectura
+
+```
+swarm-ide/
+├── backend/
+│   ├── app/
+│   │   ├── main.py          # FastAPI — endpoints REST + WebSocket terminal
+│   │   ├── graph.py         # LangGraph — agente ReAct con streaming SSE
+│   │   ├── smart_router.py  # Chain de 24 modelos, routing, fallback
+│   │   ├── tools.py         # Herramientas del agente (fs, git, cmd, http)
+│   │   ├── terminal.py      # WebSocket PTY nativo
+│   │   ├── cost_tracker.py  # Contador de tokens y coste USD
+│   │   ├── safe_fs.py       # Filesystem seguro + backups
+│   │   ├── diff_parser.py   # Resumen de diffs con IA
+│   │   └── ast_indexer.py   # Índice semántico del proyecto
+│   ├── requirements.txt
+│   └── test_models.py       # Test rápido de los 24 modelos
+├── frontend/
+│   ├── app/page.tsx         # UI principal
+│   ├── components/          # Monaco, FileExplorer, Terminal, OutputConsole…
+│   ├── lib/api.ts           # Cliente REST + SSE
+│   └── types/index.ts
+├── .env                     # Claves API (NO se sube a git)
+├── INICIAR.bat
+├── INSTALAR.bat
+└── PARAR.bat
+```
+
+---
+
+## Test de modelos
+
+Verifica qué modelos tienes activos con:
+
+```bash
+cd backend
+python test_models.py
+```
+
+Muestra latencia y estado (OK / FAIL / SIN CLAVE) para los 24 modelos del chain.
+
+---
+
+## Licencia
+
+MIT
