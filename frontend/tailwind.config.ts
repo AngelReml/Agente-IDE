@@ -9,37 +9,57 @@ const config: Config = {
   theme: {
     extend: {
       fontFamily: {
-        sans: ['Inter', 'Geist', 'system-ui', 'sans-serif'],
-        mono: ['JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', 'monospace'],
+        sans:    ['Crimson Text', 'Palatino', 'Georgia', 'serif'],
+        cinzel:  ['Cinzel', 'serif'],
+        crimson: ['Crimson Text', 'Georgia', 'serif'],
+        mono:    ['JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', 'monospace'],
       },
       colors: {
-        bg: '#050609',
+        // ── Night sky backgrounds ──────────────────────────────────────────────
+        bg:       '#080c1a',
         surface: {
-          DEFAULT: '#08090d',
-          1: '#0d0f14',
-          2: '#121419',
-          3: '#181b22',
+          DEFAULT: '#0c1128',
+          1:       '#111830',
+          2:       '#151e34',
+          3:       '#1c2440',
+          4:       '#232b4e',
         },
+        // ── Old wood / leather borders ─────────────────────────────────────────
         border: {
-          DEFAULT: '#1a1c22',
-          2: '#242730',
+          DEFAULT: '#2a1f10',
+          gold:    '#6b4c14',
+          bright:  '#b08020',
         },
-        cyan: {
-          DEFAULT: '#00f0ff',
-          dim: 'rgba(0,240,255,0.10)',
-          mid: 'rgba(0,240,255,0.15)',
-          bright: 'rgba(0,240,255,0.30)',
+        // ── Warm gold accent ───────────────────────────────────────────────────
+        gold: {
+          DEFAULT: '#c9a030',
+          dim:     'rgba(201,160,48,0.12)',
+          mid:     'rgba(201,160,48,0.25)',
+          bright:  'rgba(201,160,48,0.45)',
         },
-        magenta: {
-          DEFAULT: '#ff0055',
-          dim: 'rgba(255,0,85,0.10)',
-          mid: 'rgba(255,0,85,0.15)',
+        // ── Mystic crystal teal ────────────────────────────────────────────────
+        crystal: {
+          DEFAULT: '#4abcaa',
+          dim:     'rgba(74,188,170,0.10)',
+          mid:     'rgba(74,188,170,0.22)',
+          bright:  'rgba(74,188,170,0.40)',
         },
-        accent: {
-          DEFAULT: '#7c3aed',
-          hover: '#6d28d9',
-          soft: '#4c1d95',
+        // ── Candlelight / amber ────────────────────────────────────────────────
+        candle: {
+          DEFAULT: '#e0954a',
+          dim:     'rgba(224,149,74,0.12)',
         },
+        // ── Parchment text ─────────────────────────────────────────────────────
+        parch: {
+          DEFAULT: '#e0c878',
+          2:       '#c4a870',
+          muted:   '#8a6840',
+          deep:    '#4a3820',
+        },
+        // ── Semantic ───────────────────────────────────────────────────────────
+        success: '#5dbc6e',
+        warning: '#c9a030',
+        error:   '#c94040',
       },
       animation: {
         'pulse-slow':   'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
@@ -47,6 +67,8 @@ const config: Config = {
         'blink':        'blink 1s step-end infinite',
         'orbit':        'orbit 8s linear infinite',
         'radar':        'radar-sweep 2s linear infinite',
+        'atb':          'atb-charge 2.4s ease-in-out infinite',
+        'candle':       'candle-flicker 3s ease-in-out infinite',
       },
       keyframes: {
         blink: {
@@ -61,15 +83,25 @@ const config: Config = {
           from: { transform: 'rotate(0deg)' },
           to:   { transform: 'rotate(360deg)' },
         },
-      },
-      backdropBlur: {
-        xs: '2px',
+        'atb-charge': {
+          '0%':   { width: '0%', opacity: '0.5' },
+          '65%':  { width: '100%', opacity: '1' },
+          '75%':  { width: '100%', opacity: '1' },
+          '85%':  { width: '0%', opacity: '0.3' },
+          '100%': { width: '0%', opacity: '0.5' },
+        },
+        'candle-flicker': {
+          '0%, 100%': { opacity: '1', transform: 'scaleY(1)' },
+          '50%':      { opacity: '0.88', transform: 'scaleY(0.97)' },
+        },
       },
       boxShadow: {
-        'cyan-sm': '0 0 8px 1px rgba(0,240,255,0.12)',
-        'cyan-md': '0 0 20px 4px rgba(0,240,255,0.10)',
-        'magenta-sm': '0 0 8px 1px rgba(255,0,85,0.12)',
-        'magenta-md': '0 0 20px 4px rgba(255,0,85,0.10)',
+        'gold-sm':    '0 0 8px 1px rgba(201,160,48,0.15)',
+        'gold-md':    '0 0 20px 4px rgba(201,160,48,0.12)',
+        'gold-inner': 'inset 0 1px 0 rgba(201,160,48,0.08)',
+        'crystal-sm': '0 0 8px 1px rgba(74,188,170,0.15)',
+        'crystal-md': '0 0 20px 4px rgba(74,188,170,0.12)',
+        'parchment':  'inset 0 2px 8px rgba(0,0,0,0.4), 0 1px 0 rgba(201,160,48,0.06)',
       },
     },
   },
