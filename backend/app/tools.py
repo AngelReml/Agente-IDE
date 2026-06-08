@@ -4,82 +4,33 @@ import json
 import shutil
 import subprocess
 import logging
-import shlex
 import re
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional
 from langchain_core.tools import tool
 
-from . import safe_fs
-from . import memoria_manager
-from . import state_context
-from . import ast_indexer
+from . import safe_fs, memoria_manager, state_context, ast_indexer, config, security
 from .agents import subagents
+from .config import project_root, SKIP_DIRS, MAX_FILE_BYTES
 
 logger = logging.getLogger(__name__)
 
-PROJECT_ROOT: str = os.getenv(
-    "PROJECT_ROOT",
-    str(Path.home() / "swarm-projects" / "current"),
-)
-
-MAX_FILE_BYTES = 500_000  # 500 KB read limit
-
-SKIP_DIRS = frozenset({
-    ".git", "node_modules", "__pycache__", ".next",
-    "venv", ".venv", ".mypy_cache", "dist", "build", ".cache", ".swarm"
-})
-
-# Whitelist de comandos permitidos (primer argumento del comando)
-ALLOWED_COMMANDS = {
-    # Python runtimes
-    "python", "python3", "py",
-    # Package managers
-    "pip", "pip3",
-    # Node ecosystem
-    "node", "npm", "npx",
-    # Version control
-    "git",
-    # Network utils (built-in on Windows 10+ and most Unix)
-    "curl", "wget",
-    # Windows shell built-ins (handled natively — ver abajo)
-    "mkdir", "md", "dir", "ls", "cat", "type", "echo", "move", "copy",
-    # Testing
-    "pytest",
-}
-
-# Solo patrones genuinamente destructivos (no usamos shell=True, así que
-# pipes/redirects son inofensivos — se pasan como args literales al proceso)
-BLOCKED_PATTERNS = [
-    r"\brm\b\s+-rf",        # Unix recursive delete
-    r"\bdel\b\s+/[sS]",     # Windows recursive delete
-    r"\bformat\b\s+[A-Za-z]:",  # Disk format
-    r"\bfdisk\b",
-    r"\bshutdown\b",
-    r"\breboot\b",
-    r"\bmkfs\b",
-]
-
-# Built-ins de Windows que no son ejecutables — los manejamos con Python nativo
-_WIN_BUILTINS = {"mkdir", "md", "dir", "ls", "cat", "type", "echo", "move", "copy"}
 
 def ensure_project() -> None:
-    os.makedirs(PROJECT_ROOT, exist_ok=True)
-    git_dir = os.path.join(PROJECT_ROOT, ".git")
-    if not os.path.exists(git_dir):
-        subprocess.run(["git", "init", PROJECT_ROOT], capture_output=True, check=False)
-        subprocess.run(["git", "-C", PROJECT_ROOT, "config", "user.email", "swarm@ide.local"], capture_output=True)
-        subprocess.run(["git", "-C", PROJECT_ROOT, "config", "user.name", "Swarm IDE"], capture_output=True)
-    # Initialize memoria.md if missing
-    memoria_manager.initialize_memoria_if_needed(PROJECT_ROOT)
+    root = project_root()
+    os.makedirs(root, exist_ok=True)
+    if not os.path.exists(os.path.join(root, ".git")):
+        subprocess.run(["git", "init", root], capture_output=True, check=False)
+        subprocess.run(["git", "-C", root, "config", "user.email", "swarm@ide.local"], capture_output=True)
+        subprocess.run(["git", "-C", root, "config", "user.name", "Swarm IDE"], capture_output=True)
+    memoria_manager.initialize_memoria_if_needed(root)
+
 
 def _check_syntax(full_path: str, path_hint: str) -> str:
     ext = path_hint.rsplit(".", 1)[-1].lower() if "." in path_hint else ""
     if ext == "py":
-        r = subprocess.run(
-            [sys.executable, "-m", "py_compile", full_path],
-            capture_output=True, text=True, timeout=15,
-        )
+        r = subprocess.run([sys.executable, "-m", "py_compile", full_path],
+                           capture_output=True, text=True, timeout=15)
         if r.returncode != 0:
             return f"\n⚠️ SYNTAX ERROR — corrígelo antes de continuar:\n{r.stderr.strip()}"
         return "\n✅ syntax OK"
@@ -92,27 +43,31 @@ def _check_syntax(full_path: str, path_hint: str) -> str:
             return f"\n⚠️ INVALID JSON: {exc}"
     return ""
 
+
 def _git(args: list) -> str:
-    r = subprocess.run(
-        ["git", "-C", PROJECT_ROOT] + args,
-        capture_output=True, text=True, timeout=30,
-    )
+    r = subprocess.run(["git", "-C", project_root()] + args,
+                       capture_output=True, text=True, timeout=30)
     return (r.stdout + "\n" + r.stderr).strip()
+
+
+def _is_secret(path: str) -> bool:
+    return os.path.basename(path) in config.SECRET_FILES
+
 
 # ── File system tools ─────────────────────────────────────────────────────────
 
 @tool
 def list_files(path: str = ".") -> str:
-    """List files and directories. Accepts absolute paths (C:\\Users\\...) or paths relative to the workspace."""
+    """List files and directories. Accepts absolute paths or workspace-relative paths."""
     ensure_project()
     try:
         full = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-        
     if not os.path.exists(full):
         return f"Path not found: {path}"
     lines: list[str] = []
+    count = 0
     for root, dirs, files in os.walk(full):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         level = os.path.relpath(root, full).count(os.sep)
@@ -121,17 +76,24 @@ def list_files(path: str = ".") -> str:
         lines.append(f"{indent}{folder}/")
         for f in sorted(files):
             lines.append(f"{indent}  {f}")
+            count += 1
+            if count >= config.MAX_LIST_ENTRIES:
+                lines.append("… [truncado: demasiados archivos]")
+                return "\n".join(lines)
     return "\n".join(lines) or "(empty)"
+
 
 @tool
 def read_file(path: str) -> str:
-    """Read file content. Accepts absolute paths (C:\\Users\\...) or paths relative to the workspace."""
+    """Read file content. Accepts absolute paths or workspace-relative paths."""
     ensure_project()
     try:
         full = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-
+    if _is_secret(full):
+        return ("🔒 Acceso denegado: este archivo contiene secretos (claves API). "
+                "No se puede leer desde el agente.")
     if not os.path.exists(full):
         return f"File not found: {path}"
     if os.path.isdir(full):
@@ -141,71 +103,57 @@ def read_file(path: str) -> str:
         return f"File too large ({size:,} bytes)."
     with open(full, "r", encoding="utf-8", errors="replace") as f:
         content = f.read()
-    # Track memoria.md reads for state guard
     if os.path.basename(full).lower() == "memoria.md":
         state_context.mark_memoria_read()
     return content
 
+
 @tool
 def write_file(path: str, content: str, overwrite_external: bool = False) -> str:
-    """Write or overwrite a file. Auto-checks Python/JSON syntax.
-    Generates backup automatically. Registers change in memoria.md."""
+    """Write or overwrite a file. Auto-checks Python/JSON syntax, backs up, logs to memoria.md."""
     ensure_project()
-    
-    # Check if high risk to remind agent to consult memoria.md
-    if memoria_manager.is_high_risk_change("Modificación de archivo", [path]):
-        # Memoria manager entry will be written, but we check if we should notify
-        pass
-        
+    if _is_secret(path):
+        return "🔒 Escritura denegada: no se permite que el agente modifique archivos de secretos."
+
+    high_risk = memoria_manager.is_high_risk_change("Modificación de archivo", [path])
     try:
-        resolved, diff_out, backup_path = safe_fs.write_file_safe(path, content, overwrite_external)
-    except ValueError as e:
-        return (
-            f"⚠️ CONFIRMACION REQUERIDA: '{path}' ya existe o está fuera del workspace.\n"
-            f"Informa al usuario exactamente qué vas a cambiar y por qué. "
-            f"Si confirma, vuelve a llamar write_file con overwrite_external=True."
-        )
+        resolved, _diff, backup_path = safe_fs.write_file_safe(path, content, overwrite_external)
+    except ValueError:
+        return (f"⚠️ CONFIRMACION REQUERIDA: '{path}' ya existe o está fuera del workspace.\n"
+                f"Informa al usuario qué vas a cambiar y por qué. "
+                f"Si confirma, vuelve a llamar write_file con overwrite_external=True.")
     except Exception as e:
         return f"❌ Error al escribir: {e}"
-        
+
     verification = _check_syntax(resolved, path)
-    
-    # Document in memoria.md
     memoria_manager.add_changelog_entry(
-        PROJECT_ROOT,
-        description=f"Edición de archivo: {os.path.basename(path)}",
-        files=[path],
-        risk_level="Medio" if len(content) > 1000 else "Bajo",
-        agent_name="Swarm-Agent-Coder"
-    )
-    
-    # Track mutation for state guard
+        project_root(), description=f"Edición de archivo: {os.path.basename(path)}",
+        files=[path], risk_level="Medio" if len(content) > 1000 else "Bajo",
+        agent_name="Swarm-Agent-Coder")
     state_context.add_modified_file(path)
     if os.path.basename(path).lower() == "memoria.md":
         state_context.mark_changelog_added()
 
-    backup_msg = f" (Backup creado en {os.path.basename(backup_path)})" if backup_path else ""
-    return f"✅ {path} ({len(content):,} chars){verification}{backup_msg}"
+    backup_msg = f" (backup: {os.path.basename(backup_path)})" if backup_path else ""
+    risk_msg = "\n⚠️ Cambio de ALTO RIESGO — revisa memoria.md y considera delegate_review." if high_risk else ""
+    return f"✅ {path} ({len(content):,} chars){verification}{backup_msg}{risk_msg}"
+
 
 @tool
 def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
     """Edit an existing file by replacing an exact string — PREFERRED over write_file for modifications.
 
-    Provide the exact substring to replace and its replacement.
-    `old_string` must be unique in the file — include enough surrounding lines to make it unique.
-    Use `replace_all=True` to replace every occurrence.
-    For brand-new files or complete rewrites, use write_file instead.
+    `old_string` must be unique unless replace_all=True. For new files use write_file.
     """
     ensure_project()
-
+    if _is_secret(path):
+        return "🔒 Edición denegada: archivo de secretos protegido."
     try:
         full_path = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-
     if not os.path.exists(full_path):
         return f"❌ Archivo no encontrado: {path}"
-
     try:
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
@@ -214,40 +162,88 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
 
     count = content.count(old_string)
     if count == 0:
-        # Give useful diagnostic — show nearby area if possible
-        return (
-            f"❌ Cadena no encontrada en {path}.\n"
-            f"El archivo puede haber cambiado desde que lo leíste. "
-            f"Usa read_file para ver el contenido actual y ajusta old_string."
-        )
+        return (f"❌ Cadena no encontrada en {path}. El archivo puede haber cambiado. "
+                f"Usa read_file para ver el contenido actual y ajusta old_string.")
     if count > 1 and not replace_all:
-        return (
-            f"❌ La cadena aparece {count} veces. Incluye más contexto circundante "
-            f"para hacerla única, o usa replace_all=True."
-        )
+        return (f"❌ La cadena aparece {count} veces. Incluye más contexto para hacerla única "
+                f"o usa replace_all=True.")
 
     new_content = content.replace(old_string, new_string) if replace_all else content.replace(old_string, new_string, 1)
-
     try:
-        resolved, diff_out, backup_path = safe_fs.write_file_safe(path, new_content, overwrite_external=True)
+        resolved, _diff, backup_path = safe_fs.write_file_safe(path, new_content, overwrite_external=True)
     except Exception as e:
         return f"❌ Error al escribir: {e}"
 
     verification = _check_syntax(resolved, path)
     memoria_manager.add_changelog_entry(
-        PROJECT_ROOT,
-        description=f"Edición quirúrgica: {os.path.basename(path)}",
-        files=[path],
-        risk_level="Bajo",
-        agent_name="Swarm-Agent-Coder",
-    )
+        project_root(), description=f"Edición quirúrgica: {os.path.basename(path)}",
+        files=[path], risk_level="Bajo", agent_name="Swarm-Agent-Coder")
     state_context.add_modified_file(path)
     if os.path.basename(path).lower() == "memoria.md":
         state_context.mark_changelog_added()
 
-    n_replaced = count if replace_all else 1
+    n = count if replace_all else 1
     backup_msg = f" (backup: {os.path.basename(str(backup_path))})" if backup_path else ""
-    return f"✅ edit_file: {path} — {n_replaced} reemplazo(s){verification}{backup_msg}"
+    return f"✅ edit_file: {path} — {n} reemplazo(s){verification}{backup_msg}"
+
+
+@tool
+def apply_patch(patch: str) -> str:
+    """Apply MULTIPLE edits across one or more files in a single atomic-ish operation.
+
+    `patch` is a JSON array of objects: [{"path": "...", "old_string": "...",
+    "new_string": "...", "replace_all": false}, ...]. Each entry is validated
+    against the current file content BEFORE anything is written; if any entry
+    fails to match, nothing is applied. Far more efficient than many edit_file
+    calls for multi-file refactors.
+    """
+    ensure_project()
+    try:
+        entries = json.loads(patch)
+        assert isinstance(entries, list)
+    except Exception:
+        return "❌ apply_patch: `patch` debe ser un array JSON de objetos {path, old_string, new_string}."
+
+    # Phase 1 — validate everything (dry run, accumulate per-file new content).
+    staged: dict[str, str] = {}
+    for i, e in enumerate(entries):
+        path = e.get("path", "")
+        old = e.get("old_string", "")
+        new = e.get("new_string", "")
+        replace_all = bool(e.get("replace_all", False))
+        if _is_secret(path):
+            return f"❌ apply_patch[{i}]: archivo de secretos protegido ({path})."
+        try:
+            full = safe_fs.resolve_and_validate_path(path, allow_external=True)
+        except ValueError as ex:
+            return f"❌ apply_patch[{i}]: {ex}"
+        if not os.path.exists(full):
+            return f"❌ apply_patch[{i}]: archivo no encontrado: {path}"
+        base = staged.get(full)
+        if base is None:
+            with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                base = fh.read()
+        cnt = base.count(old)
+        if cnt == 0:
+            return f"❌ apply_patch[{i}]: cadena no encontrada en {path}."
+        if cnt > 1 and not replace_all:
+            return f"❌ apply_patch[{i}]: cadena ambigua ({cnt}×) en {path}; usa replace_all o más contexto."
+        staged[full] = base.replace(old, new) if replace_all else base.replace(old, new, 1)
+
+    # Phase 2 — commit.
+    results = []
+    for full, content in staged.items():
+        try:
+            resolved, _d, backup = safe_fs.write_file_safe(full, content, overwrite_external=True)
+            verification = _check_syntax(resolved, full)
+            state_context.add_modified_file(full)
+            results.append(f"✅ {os.path.relpath(full, project_root())}{verification}")
+        except Exception as ex:
+            results.append(f"❌ {full}: {ex}")
+    memoria_manager.add_changelog_entry(
+        project_root(), description=f"apply_patch: {len(staged)} archivo(s)",
+        files=list(staged.keys()), risk_level="Medio", agent_name="Swarm-Agent-Coder")
+    return f"apply_patch — {len(staged)} archivo(s):\n" + "\n".join(results)
 
 
 @tool
@@ -256,27 +252,18 @@ def delete_file(path: str, confirmed: bool = False) -> str:
     ensure_project()
     try:
         resolved, is_dir = safe_fs.delete_file_safe(path, confirmed)
-    except ValueError as e:
-        return (
-            f"⚠️ CONFIRMACION REQUERIDA: '{path}' está fuera del workspace.\n"
-            f"Informa al usuario qué vas a borrar. "
-            f"Si confirma, vuelve a llamar delete_file con confirmed=True."
-        )
+    except ValueError:
+        return (f"⚠️ CONFIRMACION REQUERIDA: '{path}' está fuera del workspace.\n"
+                f"Informa al usuario qué vas a borrar. Si confirma, llama delete_file con confirmed=True.")
     except FileNotFoundError as e:
         return str(e)
     except Exception as e:
         return f"❌ Error al eliminar: {e}"
-        
-    # Document in memoria.md
     memoria_manager.add_changelog_entry(
-        PROJECT_ROOT,
-        description=f"Eliminación de {'directorio' if is_dir else 'archivo'}: {os.path.basename(path)}",
-        files=[path],
-        risk_level="Alto",
-        agent_name="Swarm-Agent-Coder"
-    )
-    
+        project_root(), description=f"Eliminación de {'directorio' if is_dir else 'archivo'}: {os.path.basename(path)}",
+        files=[path], risk_level="Alto", agent_name="Swarm-Agent-Coder")
     return f"✅ Deleted {'directory' if is_dir else 'file'}: {path} (backups guardados)"
+
 
 @tool
 def move_file(src: str, dst: str) -> str:
@@ -287,217 +274,198 @@ def move_file(src: str, dst: str) -> str:
         full_dst = safe_fs.resolve_and_validate_path(dst, allow_external=True)
     except ValueError as e:
         return str(e)
-        
     if not os.path.exists(full_src):
         return f"Source not found: {src}"
     os.makedirs(os.path.dirname(full_dst) or ".", exist_ok=True)
     shutil.move(full_src, full_dst)
-    
-    # Document in memoria.md
     memoria_manager.add_changelog_entry(
-        PROJECT_ROOT,
-        description=f"Movimiento/Renombrado: {os.path.basename(src)} -> {os.path.basename(dst)}",
-        files=[src, dst],
-        risk_level="Bajo",
-        agent_name="Swarm-Agent-Coder"
-    )
+        project_root(), description=f"Movimiento/Renombrado: {os.path.basename(src)} -> {os.path.basename(dst)}",
+        files=[src, dst], risk_level="Bajo", agent_name="Swarm-Agent-Coder")
     return f"✅ Moved: {src} → {dst}"
+
 
 @tool
 def preview_changes(path: str, content: str) -> str:
-    """Preview changes before writing them. Generates a unified diff."""
+    """Preview a write as a unified diff WITHOUT writing. Useful before a risky write_file."""
     ensure_project()
     try:
         resolved = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-        
     old_content = ""
     if os.path.exists(resolved):
         if os.path.isdir(resolved):
-            return f"'{path}' es un directorio, no se puede hacer preview."
+            return f"'{path}' es un directorio."
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
             old_content = f.read()
-            
     diff = safe_fs.get_diff(old_content, content, os.path.basename(resolved))
-    return diff if diff else "No hay cambios con respecto al archivo actual."
+    return diff or "No hay cambios respecto al archivo actual."
+
+
+# ── Plan / TODO (agentic task tracking) ────────────────────────────────────────
+
+def _plan_path() -> str:
+    d = os.path.join(project_root(), ".swarm")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, "plan.md")
+
 
 @tool
-def restore_file(path: str, timestamp: int) -> str:
-    """Restore a file to a previous backup snapshot using its timestamp."""
+def update_plan(plan: str) -> str:
+    """Record/replace the agent's working plan (a markdown checklist of steps).
+
+    Use at the start of any multi-step task and update it as steps complete.
+    Format suggestion: '- [x] done step' / '- [ ] pending step'. Persisted so the
+    user can see it in the UI and the agent can re-read it next turn.
+    """
     ensure_project()
     try:
-        resolved = safe_fs.restore_backup(path, timestamp)
-        
-        # Document in memoria.md
-        memoria_manager.add_changelog_entry(
-            PROJECT_ROOT,
-            description=f"Restauración de backup de {os.path.basename(path)} (Timestamp {timestamp})",
-            files=[path],
-            risk_level="Medio",
-            agent_name="Swarm-Agent-Safety"
-        )
-        return f"✅ Archivo '{path}' restaurado correctamente."
+        with open(_plan_path(), "w", encoding="utf-8") as f:
+            f.write(plan.strip() + "\n")
+        return f"✅ Plan actualizado ({plan.count(chr(10)) + 1} líneas)."
     except Exception as e:
-        return f"❌ Error al restaurar backup: {e}"
+        return f"❌ No se pudo guardar el plan: {e}"
 
-# ── Safe Command execution (Sandbox) ──────────────────────────────────────────
+
+@tool
+def read_plan() -> str:
+    """Read the current working plan, if any."""
+    ensure_project()
+    p = _plan_path()
+    if not os.path.exists(p):
+        return "No hay plan activo. Crea uno con update_plan."
+    with open(p, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+# ── Command execution ──────────────────────────────────────────────────────────
 
 @tool
 def run_command(command: str, timeout: int = 120) -> str:
-    """Execute a shell command inside the project workspace directory.
-    Supports: python, pip, node, npm, npx, git, curl, pytest, mkdir, ls/dir.
-    Tip: for complex OS tasks, write a Python script and run it with `python script.py`.
+    """Execute a shell command inside the project workspace.
+    Supports: python, pip, node, npm/pnpm/yarn, npx, git, curl, pytest, ruff, tsc, mkdir, ls/dir.
+    For complex OS tasks, write a Python script and run it with `python script.py`.
     """
     ensure_project()
-
-    # 1. Tokenize
     try:
-        args = shlex.split(command)
+        args = security.tokenize(command)
     except Exception as e:
         return f"❌ Error parsing command: {e}"
-
     if not args:
         return "❌ Comando vacío"
 
     cmd_name = args[0].lower() if sys.platform == "win32" else args[0]
 
-    # 2. Check blacklist (genuinely destructive patterns — shell=False so no injection risk)
-    for pattern in BLOCKED_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return f"❌ Patrón peligroso detectado ({pattern}). Ejecución denegada."
+    blocked = security.blocked_command(command)
+    if blocked:
+        return f"❌ Patrón peligroso detectado ({blocked}). Ejecución denegada."
 
-    # 3. Native handlers for Windows shell built-ins (no executable on PATH)
+    root = project_root()
     if cmd_name in ("mkdir", "md"):
-        target = " ".join(args[1:]).strip().strip('"\'') if len(args) > 1 else ""
+        target = " ".join(args[1:]).strip().strip('"\'')
         if not target:
             return "❌ mkdir: especifica un directorio"
-        p = Path(PROJECT_ROOT) / target
         try:
-            p.mkdir(parents=True, exist_ok=True)
-            return f"✅ Directorio creado: {p}"
+            (Path(root) / target).mkdir(parents=True, exist_ok=True)
+            return f"✅ Directorio creado: {target}"
         except Exception as e:
             return f"❌ mkdir: {e}"
-
     if cmd_name in ("dir", "ls"):
-        target_path = Path(PROJECT_ROOT) / (args[1] if len(args) > 1 else ".")
+        target_path = Path(root) / (args[1] if len(args) > 1 else ".")
         try:
             entries = sorted(target_path.iterdir(), key=lambda x: (x.is_file(), x.name))
-            lines = [f"{'[DIR] ' if e.is_dir() else '      '}{e.name}" for e in entries]
-            return "\n".join(lines) or "(vacío)"
+            return "\n".join(f"{'[DIR] ' if e.is_dir() else '      '}{e.name}" for e in entries) or "(vacío)"
         except Exception as e:
             return f"❌ ls: {e}"
-
     if cmd_name in ("cat", "type"):
-        target = Path(PROJECT_ROOT) / (args[1] if len(args) > 1 else "")
+        target = Path(root) / (args[1] if len(args) > 1 else "")
+        if _is_secret(str(target)):
+            return "🔒 Acceso denegado a archivo de secretos."
         try:
             return target.read_text(encoding="utf-8", errors="replace")
         except Exception as e:
             return f"❌ cat: {e}"
-
     if cmd_name == "echo":
         return " ".join(args[1:])
 
-    # 4. Whitelist check for external executables
-    base = os.path.basename(args[0])            # handle full paths like /usr/bin/python
-    base_no_ext = base.rsplit(".", 1)[0].lower()  # strip .exe on Windows
-    if base_no_ext not in {c.lower() for c in ALLOWED_COMMANDS} and cmd_name not in ALLOWED_COMMANDS:
-        return (
-            f"❌ Comando '{args[0]}' no está en la lista permitida.\n"
-            f"Permitidos: {', '.join(sorted(ALLOWED_COMMANDS))}"
-        )
+    base = os.path.basename(args[0])
+    base_no_ext = base.rsplit(".", 1)[0].lower()
+    allowed = {c.lower() for c in config.ALLOWED_COMMANDS}
+    if base_no_ext not in allowed and cmd_name not in config.ALLOWED_COMMANDS:
+        return (f"❌ Comando '{args[0]}' no permitido.\nPermitidos: {', '.join(sorted(config.ALLOWED_COMMANDS))}")
 
-    # 5. Log package installs
     if cmd_name in {"pip", "pip3"} and len(args) > 1 and args[1] == "install":
-        memoria_manager.add_changelog_entry(
-            PROJECT_ROOT,
-            description=f"pip install: {' '.join(args[2:])}",
-            files=["requirements.txt"],
-            risk_level="Bajo",
-            agent_name="Swarm-Agent-Coder",
-        )
-    if cmd_name == "npm" and len(args) > 1 and args[1] in {"install", "i"}:
-        memoria_manager.add_changelog_entry(
-            PROJECT_ROOT,
-            description=f"npm install: {' '.join(args[2:])}",
-            files=["package.json"],
-            risk_level="Bajo",
-            agent_name="Swarm-Agent-Coder",
-        )
+        memoria_manager.add_changelog_entry(root, description=f"pip install: {' '.join(args[2:])}",
+                                             files=["requirements.txt"], risk_level="Bajo", agent_name="Swarm-Agent-Coder")
+    if cmd_name in {"npm", "pnpm", "yarn"} and len(args) > 1 and args[1] in {"install", "i", "add"}:
+        memoria_manager.add_changelog_entry(root, description=f"{cmd_name} install: {' '.join(args[2:])}",
+                                             files=["package.json"], risk_level="Bajo", agent_name="Swarm-Agent-Coder")
 
-    # 6. Resolve executable path
-    executable = shutil.which(args[0]) or shutil.which(cmd_name)
-    if executable:
-        args[0] = executable
+    # Execute through the configured sandbox backend (local by default; docker
+    # when SWARM_SANDBOX=docker/auto). The backend resolves the executable.
+    from .platform import sandbox
+    backend = sandbox.get_backend()
+    res = backend.run(args, cwd=root, timeout=timeout)
+    out, err = res.stdout, res.stderr
+    if res.returncode == 127 and "no encontrado" in err:
+        return f"❌ {err.strip()}\nTip: usa 'python -m {cmd_name}' o instala con pip."
+    combined = out + (("\nSTDERR:\n" if out else "") + err if err else "")
+    status = "✅" if res.returncode == 0 else f"⚠️ exit {res.returncode}"
+    tag = f" [{backend.name}]" if getattr(backend, "name", "local") != "local" else ""
+    return f"{status}{tag}\n{combined.strip()}" if combined.strip() else f"{status}{tag}"
+
+
+@tool
+def run_tests(target: str = "") -> str:
+    """Auto-detect and run the project's test suite (pytest or npm/pnpm test).
+
+    Pass `target` to scope it (e.g. a path for pytest, a script for npm). Returns
+    the test output. Use this after edits to verify before git_commit.
+    """
+    ensure_project()
+    root = project_root()
+    if os.path.exists(os.path.join(root, "package.json")):
+        cmd = f"npm test {target}".strip()
+    elif (os.path.exists(os.path.join(root, "pytest.ini")) or os.path.exists(os.path.join(root, "pyproject.toml"))
+          or os.path.exists(os.path.join(root, "tests")) or target.endswith(".py")):
+        cmd = f"python -m pytest {target} -q".strip()
     else:
-        return (
-            f"❌ Ejecutable '{args[0]}' no encontrado en PATH.\n"
-            f"Tip: usa 'python -m {cmd_name}' o instala con 'pip install {cmd_name}'."
-        )
+        return "No se detectó framework de tests (ni package.json ni pytest). Especifica un comando con run_command."
+    return run_command.invoke({"command": cmd, "timeout": 300})
 
-    # 7. Run
-    try:
-        result = subprocess.run(
-            args,
-            shell=False,
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env={**os.environ, "CI": "true", "TERM": "dumb", "PYTHONUNBUFFERED": "1"},
-        )
-        out = result.stdout or ""
-        err = result.stderr or ""
-        combined = out
-        if err:
-            combined += ("\nSTDERR:\n" if out else "") + err
-        status = "✅" if result.returncode == 0 else f"⚠️ exit {result.returncode}"
-        return f"{status}\n{combined.strip()}" if combined.strip() else status
-    except subprocess.TimeoutExpired:
-        return f"❌ Timeout después de {timeout}s. Considera dividir la tarea o aumentar timeout."
-    except Exception as exc:
-        return f"❌ Error de ejecución: {exc}"
 
-# ── HTTP fetch (sin dependencias externas) ────────────────────────────────────
+# ── HTTP fetch (SSRF-guarded) ──────────────────────────────────────────────────
 
 @tool
 def fetch_url(url: str, as_json: bool = False) -> str:
     """Fetch content from a URL (HTTP GET). No external packages required.
-    Use for:
-    - Public APIs (Open-Meteo, CoinGecko, etc.)
-    - Web pages for scraping
-    Set as_json=True to pretty-print JSON responses.
-    Returns up to 50,000 characters.
+    Private/loopback/link-local destinations are blocked (SSRF protection).
+    Set as_json=True to pretty-print JSON. Returns up to 50,000 characters.
     """
     import urllib.request
     import urllib.error
 
+    blocked = security.validate_outbound_url(url)
+    if blocked:
+        return f"❌ {blocked}"
     try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 SwarmIDE/3.0",
-                "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
-                "Accept-Language": "es,en;q=0.9",
-            },
-        )
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 SwarmIDE/4.0",
+            "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
+            "Accept-Language": "es,en;q=0.9",
+        })
         with urllib.request.urlopen(req, timeout=20) as resp:
             raw = resp.read()
             charset = resp.info().get_content_charset("utf-8")
             text = raw.decode(charset, errors="replace")
-
         if as_json:
-            import json as _json
             try:
-                text = _json.dumps(_json.loads(text), indent=2, ensure_ascii=False)
+                text = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
             except Exception:
-                pass  # return raw if not valid JSON
-
+                pass
         if len(text) > 50_000:
             text = text[:50_000] + f"\n…[truncado — {len(text):,} chars total]"
-
         return text
-
     except urllib.error.HTTPError as e:
         return f"HTTP {e.code} {e.reason}: {url}"
     except urllib.error.URLError as e:
@@ -506,85 +474,83 @@ def fetch_url(url: str, as_json: bool = False) -> str:
         return f"Error: {e}"
 
 
-# ── Repository Search & Deep Understanding (repos gigantes) ────────────────────
+# ── Search / understanding ─────────────────────────────────────────────────────
 
 @tool
 def grep_search(query: str, path: str = ".") -> str:
-    """Fast search for pattern/query recursively inside file contents in a directory.
-    Uses regex matching inside files to locate references, functions, definitions, etc."""
+    """Fast recursive regex search inside file contents."""
     ensure_project()
     try:
         full = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-        
     results = []
-    pattern = re.compile(re.escape(query), re.IGNORECASE)
-    
+    try:
+        pattern = re.compile(query, re.IGNORECASE)
+    except re.error:
+        pattern = re.compile(re.escape(query), re.IGNORECASE)
     count = 0
     for root, dirs, files in os.walk(full):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for file in files:
-            file_path = os.path.join(root, file)
-            # Skip large files or binary files
-            if os.path.exists(file_path) and os.path.getsize(file_path) > 300_000:
+            fp = os.path.join(root, file)
+            if _is_secret(fp):
                 continue
             try:
-                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                    for line_num, line in enumerate(f, 1):
+                if os.path.getsize(fp) > config.MAX_GREP_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
+            try:
+                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                    for ln, line in enumerate(f, 1):
                         if pattern.search(line):
-                            rel = os.path.relpath(file_path, PROJECT_ROOT)
-                            results.append(f"{rel}:{line_num}: {line.strip()}")
+                            results.append(f"{os.path.relpath(fp, project_root())}:{ln}: {line.strip()}")
                             count += 1
-                            if count >= 100:  # Cap results for context safety
+                            if count >= config.MAX_GREP_RESULTS:
                                 break
             except Exception:
                 pass
-            if count >= 100:
+            if count >= config.MAX_GREP_RESULTS:
                 break
-        if count >= 100:
+        if count >= config.MAX_GREP_RESULTS:
             results.append("... [Truncado, demasiados resultados]")
             break
-            
     return "\n".join(results) if results else "No se encontraron coincidencias."
+
 
 @tool
 def get_architecture_tree(path: str = ".") -> str:
-    """Shows only the high level structure (directories and config files) to understand the project architecture.
-    Ignores regular files to keep context small for large repositories."""
+    """Show only directories and key config/entry files for a high-level architecture view."""
     ensure_project()
     try:
         full = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-        
     lines = []
+    important = {r"package\.json", r"requirements\.txt", r"pyproject\.toml", r"tsconfig\.json",
+                r"\.env\.example", r"docker.*", r"main\.py", r"graph\.py", r"index\.ts",
+                r"page\.tsx", r"App\.tsx", r"Cargo\.toml", r"go\.mod"}
     for root, dirs, files in os.walk(full):
         dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
         level = os.path.relpath(root, full).count(os.sep)
         indent = "  " * level
         folder = os.path.basename(root) if root != full else str(full)
         lines.append(f"{indent}{folder}/")
-        
-        # Only show configuration, requirements, package files or main files
-        important_patterns = {
-            r"package\.json", r"requirements\.txt", r"tsconfig\.json",
-            r"\.env.*", r"docker.*", r"main\.py", r"graph\.py",
-            r"index\.ts", r"page\.tsx", r"App\.tsx", r"Cargo\.toml"
-        }
         for f in sorted(files):
-            if any(re.match(pat, f, re.IGNORECASE) for pat in important_patterns):
+            if any(re.match(pat, f, re.IGNORECASE) for pat in important):
                 lines.append(f"{indent}  {f} [CONFIG/CRÍTICO]")
-                
     return "\n".join(lines)
 
-# ── Git tools ─────────────────────────────────────────────────────────────────
+
+# ── Git tools ──────────────────────────────────────────────────────────────────
 
 @tool
 def git_status() -> str:
     """Show current git working tree status."""
     ensure_project()
     return _git(["status", "--short"]) or "Working tree clean"
+
 
 @tool
 def git_diff(path: Optional[str] = None) -> str:
@@ -593,17 +559,18 @@ def git_diff(path: Optional[str] = None) -> str:
     args = ["diff"]
     if path:
         try:
-            rel = os.path.relpath(safe_fs.resolve_and_validate_path(path, allow_external=True), PROJECT_ROOT)
-            args.append(rel)
+            args.append(os.path.relpath(safe_fs.resolve_and_validate_path(path, allow_external=True), project_root()))
         except ValueError:
             return "Invalid path"
     return _git(args) or "No unstaged changes"
 
+
 @tool
 def git_log(n: int = 10) -> str:
-    """Show last N commits (oneline format)."""
+    """Show last N commits (oneline)."""
     ensure_project()
     return _git(["log", f"-{min(n, 50)}", "--oneline", "--decorate"]) or "No commits yet"
+
 
 @tool
 def git_commit(message: str) -> str:
@@ -615,6 +582,7 @@ def git_commit(message: str) -> str:
         return "ℹ️ Nothing to commit"
     return f"✅ {result}"
 
+
 @tool
 def git_push(branch: str = "main") -> str:
     """Push to origin."""
@@ -624,11 +592,13 @@ def git_push(branch: str = "main") -> str:
         return f"⚠️ Push failed: {result}"
     return f"✅ Pushed to {branch}"
 
+
 @tool
 def git_create_branch(name: str) -> str:
     """Create and switch to a new branch."""
     ensure_project()
     return _git(["checkout", "-b", name])
+
 
 @tool
 def git_checkout(ref: str) -> str:
@@ -636,88 +606,70 @@ def git_checkout(ref: str) -> str:
     ensure_project()
     return _git(["checkout", ref])
 
-@tool
-def delegate_research(query: str) -> str:
-    """Delegates a research task on a large repository to the Researcher Agent.
-    Use this to synthesize structure, dependencies and main files for a complex task."""
-    ensure_project()
-    return subagents.run_researcher(query, PROJECT_ROOT)
+
+# ── Subagent delegation (async, non-blocking) ──────────────────────────────────
 
 @tool
-def delegate_review(path: str, proposed_content: str) -> str:
-    """Delegates a code review to the Reviewer Agent to verify security, performance, 
-    and style before doing a write_file."""
+async def delegate_research(query: str) -> str:
+    """Delegate research on a large repo to the Researcher subagent (cheap model, async)."""
+    ensure_project()
+    return await subagents.run_researcher(query, project_root())
+
+
+@tool
+async def delegate_review(path: str, proposed_content: str) -> str:
+    """Delegate a code review (security/architecture/perf/correctness) before writing."""
     ensure_project()
     try:
         resolved = safe_fs.resolve_and_validate_path(path, allow_external=True)
     except ValueError as e:
         return str(e)
-    
     old_content = ""
     if os.path.exists(resolved):
         with open(resolved, "r", encoding="utf-8", errors="replace") as f:
             old_content = f.read()
-            
     diff = safe_fs.get_diff(old_content, proposed_content, os.path.basename(resolved))
     if not diff:
         return "No hay cambios propuestos para revisar."
-    return subagents.run_reviewer(path, diff)
+    return await subagents.run_reviewer(path, diff)
 
-# ── Semantic index tools ──────────────────────────────────────────────────────
+
+# ── Semantic index tools ───────────────────────────────────────────────────────
 
 @tool
 def get_semantic_map() -> str:
-    """Get a human-readable map of all indexed symbols (classes, functions, types) across the project.
-    Much more efficient than grep for understanding architecture before modifying code."""
+    """Human-readable map of indexed symbols (classes, functions, types) across the project."""
     ensure_project()
-    # Rebuild index if it doesn't exist or is older than 5 minutes
-    idx = ast_indexer.load_index(PROJECT_ROOT)
-    if not idx or (idx.get("generated_at", 0) < (int(__import__("time").time()) - 300)):
-        ast_indexer.save_index(PROJECT_ROOT)
-    return ast_indexer.format_semantic_map(PROJECT_ROOT)
+    import time as _t
+    idx = ast_indexer.load_index(project_root())
+    if not idx or (idx.get("generated_at", 0) < int(_t.time()) - 300):
+        ast_indexer.save_index(project_root())
+    return ast_indexer.format_semantic_map(project_root())
 
 
 @tool
 def search_semantic_symbol(symbol: str) -> str:
-    """Search for a function, class, or type by name across the indexed project.
-    Returns exact file paths and line numbers. Faster and more precise than grep_search."""
+    """Search a function/class/type by name across the indexed project (exact file:line)."""
     ensure_project()
-    idx = ast_indexer.load_index(PROJECT_ROOT)
-    if not idx:
-        ast_indexer.save_index(PROJECT_ROOT)
-    results = ast_indexer.search_symbol(PROJECT_ROOT, symbol)
+    if not ast_indexer.load_index(project_root()):
+        ast_indexer.save_index(project_root())
+    results = ast_indexer.search_symbol(project_root(), symbol)
     if not results:
-        return f"No se encontró el símbolo '{symbol}' en el índice. Prueba con grep_search para búsqueda de texto."
-    lines = [f"🔍 Símbolo '{symbol}' encontrado en {len(results)} lugar(es):"]
+        return f"No se encontró el símbolo '{symbol}'. Prueba grep_search."
+    lines = [f"🔍 Símbolo '{symbol}' en {len(results)} lugar(es):"]
     for r in results[:20]:
         lines.append(f"  📄 {r['file']}:{r['line']}  [{r['kind']}] {r['name']}")
     return "\n".join(lines)
 
 
-# ── All tools list ─────────────────────────────────────────────────────────────
+# ── All tools ──────────────────────────────────────────────────────────────────
 
 ALL_TOOLS = [
-    list_files,
-    read_file,
-    edit_file,
-    write_file,
-    fetch_url,
-    delete_file,
-    move_file,
-    preview_changes,
-    restore_file,
-    run_command,
-    grep_search,
-    get_architecture_tree,
-    get_semantic_map,
-    search_semantic_symbol,
-    delegate_research,
-    delegate_review,
-    git_status,
-    git_diff,
-    git_log,
-    git_commit,
-    git_push,
-    git_create_branch,
-    git_checkout,
+    list_files, read_file, edit_file, write_file, apply_patch, fetch_url,
+    delete_file, move_file, preview_changes,
+    update_plan, read_plan,
+    run_command, run_tests,
+    grep_search, get_architecture_tree, get_semantic_map, search_semantic_symbol,
+    delegate_research, delegate_review,
+    git_status, git_diff, git_log, git_commit, git_push, git_create_branch, git_checkout,
 ]

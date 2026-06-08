@@ -1,19 +1,38 @@
-import os
+"""
+Specialised subagents (researcher, reviewer) — now async and non-blocking.
+
+The model calls run in a worker thread (asyncio.to_thread) so they no longer
+freeze the event loop, which lets the orchestrator fan out work in parallel.
+"""
+import asyncio
 import logging
+
 from langchain_core.messages import HumanMessage
-from ..smart_router import get_cheap_model, current_model
-from .. import safe_fs
+from ..smart_router import get_cheap_model, get_heavy_model
 
 logger = logging.getLogger(__name__)
 
 
-def run_researcher(query: str, project_root: str) -> str:
-    """Subagente Investigador — usa el modelo rápido/barato."""
-    from ..tools import get_architecture_tree, grep_search
+async def _ask(prompt: str) -> str:
+    """Invoke the cheap model in a thread; fall back to a heavy model on error."""
+    def _call(model_factory):
+        model = model_factory()
+        return model.invoke([HumanMessage(content=prompt)]).content
 
+    try:
+        return await asyncio.to_thread(_call, get_cheap_model)
+    except Exception as exc:
+        logger.warning("subagent cheap failed: %s — retrying heavy", exc)
+        try:
+            return await asyncio.to_thread(_call, get_heavy_model)
+        except Exception as e:
+            return f"Error en subagente: {e}"
+
+
+async def run_researcher(query: str, project_root: str) -> str:
+    from ..tools import get_architecture_tree, grep_search
     structure = get_architecture_tree.invoke({})
     grep_results = grep_search.invoke({"query": query})
-
     prompt = f"""Actúas como Investigador de Código. Responde a la consulta analizando la estructura.
 
 CONSULTA:
@@ -29,22 +48,10 @@ Escribe un reporte estructurado en español:
 1. Archivos principales relacionados con la consulta y su rol.
 2. Flujo de datos y dependencias clave.
 3. Qué archivos deben leerse o modificarse para resolver la consulta."""
-
-    try:
-        model = get_cheap_model()
-        response = model.invoke([HumanMessage(content=prompt)])
-        return response.content
-    except Exception as exc:
-        logger.warning("run_researcher cheap failed: %s — retrying with main model", exc)
-        try:
-            response = current_model().invoke([HumanMessage(content=prompt)])
-            return response.content
-        except Exception as e:
-            return f"Error en subagente Researcher: {e}"
+    return await _ask(prompt)
 
 
-def run_reviewer(file_path: str, diff: str) -> str:
-    """Subagente Revisor — usa el modelo rápido/barato."""
+async def run_reviewer(file_path: str, diff: str) -> str:
     prompt = f"""Actúas como Ingeniero Principal haciendo Code Review de `{file_path}`.
 
 DIFF:
@@ -52,24 +59,14 @@ DIFF:
 {diff}
 ```
 
-Evalúa:
+Evalúa con rigor:
 1. **Seguridad**: ¿Introduce vulnerabilidades?
 2. **Arquitectura**: ¿Respeta el diseño actual?
 3. **Rendimiento**: ¿Hay ineficiencias?
+4. **Corrección**: ¿Bugs, casos límite no cubiertos?
 
-Veredicto:
-- Si hay problemas graves: "❌ RECHAZADO: [motivo]"
-- Si es correcto: "✅ APROBADO: [comentario breve]"
+Veredicto OBLIGATORIO en la primera línea:
+- "❌ RECHAZADO: [motivo]" si hay problemas graves.
+- "✅ APROBADO: [comentario breve]" si es correcto.
 Sé directo y objetivo."""
-
-    try:
-        model = get_cheap_model()
-        response = model.invoke([HumanMessage(content=prompt)])
-        return response.content
-    except Exception as exc:
-        logger.warning("run_reviewer cheap failed: %s — retrying with main model", exc)
-        try:
-            response = current_model().invoke([HumanMessage(content=prompt)])
-            return response.content
-        except Exception as e:
-            return f"Error en subagente Reviewer: {e}"
+    return await _ask(prompt)

@@ -10,11 +10,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Any
 
-INDEXED_EXTS = {'.py', '.ts', '.tsx', '.js', '.jsx'}
-SKIP_DIRS = frozenset({
-    ".git", "node_modules", "__pycache__", ".next",
-    "venv", ".venv", ".mypy_cache", "dist", "build", ".cache", ".swarm"
-})
+from .config import SKIP_DIRS, INDEXED_EXTS
 
 _JS_PATTERNS = [
     (r'(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)', 'function'),
