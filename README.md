@@ -1,8 +1,10 @@
-# Swarm IDE v3.0
+# Swarm IDE v5.0
 
-IDE multi-agente que escribe código por ti. Describe lo que necesitas en lenguaje natural y el agente analiza el proyecto, crea y edita archivos, ejecuta comandos, hace commit y te informa en tiempo real de cada paso.
+IDE multi-agente que escribe código por ti. Describe lo que necesitas en lenguaje natural y el agente (único o en **enjambre paralelo**) planifica, analiza el proyecto, crea y edita archivos (incluso de forma multi-archivo atómica), ejecuta tests, hace commit y te informa en tiempo real de cada paso.
 
-**Sin Docker. Corre directamente en Windows.**
+**Local-first: corre con un clic en Windows, sin Docker.** Y escala a plataforma multi-tenant cuando lo necesitas.
+
+> **v5.0** — cimientos de plataforma: ejecutor sandbox (Docker/local), runs durables y reconectables, persistencia pluggable (SQLite/Postgres), auth + RBAC, orquestador de enjambre paralelo, evals + CI. Construido sobre v4.0 (seguridad por capas, fallback de 24 modelos). Ver `CHANGELOG.md`, `ROADMAP.md` y `ARCHITECTURE.md`.
 
 ---
 
@@ -16,8 +18,13 @@ IDE multi-agente que escribe código por ti. Describe lo que necesitas en lengua
 - **Contador de coste** — tokens y USD por ejecución y por sesión
 - **Timeline de backups** — restaura cualquier archivo a cualquier versión anterior
 - **Historial de sesión** — el agente recuerda el contexto entre cambios de modelo
-- **Cambio de proyecto en caliente** — sin reiniciar el backend
-- **Detección de bucles** — avisa si el agente repite la misma acción 3+ veces, aborta a las 6
+- **Cambio de proyecto en caliente** — aplicado en runtime, sin reiniciar el backend
+- **Detección de bucles** — ventana deslizante; avisa a las 3 repeticiones, aborta a las 6
+- **Planificación del agente** — checklist persistente (`update_plan`) estilo IDE agéntico
+- **Verificación automática** — `run_tests` (pytest/npm) antes de cada commit
+- **Edición multi-archivo atómica** — `apply_patch` valida todo antes de escribir nada
+- **Persistencia** — runs, eventos y coste en SQLite; sobreviven a reinicios
+- **Seguridad por capas** — loopback por defecto, token para exposición en LAN, SSRF y secretos protegidos
 
 ---
 
@@ -70,6 +77,21 @@ OPENROUTER_API_KEY=sk-or-v1-...   # acceso a todos los modelos vía OpenRouter
 
 Con al menos **una** clave el IDE funciona. Cada proveedor que añadas amplía el chain de fallback.
 
+### Configuración del servidor (opcional)
+
+```env
+SWARM_HOST=127.0.0.1            # loopback por defecto. 0.0.0.0 para exponer en la LAN
+SWARM_PORT=8000
+SWARM_AUTH_TOKEN=               # secreto compartido. OBLIGATORIO si SWARM_HOST no es loopback
+SWARM_CORS_ORIGINS=             # orígenes permitidos (coma-separados); por defecto localhost:3000
+SWARM_ALLOW_PRIVATE_FETCH=0     # 1 permite que fetch_url alcance IPs privadas (desactivado por seguridad)
+```
+
+**Importante:** si expones el backend fuera de `localhost` (`SWARM_HOST=0.0.0.0`), define
+`SWARM_AUTH_TOKEN` y pásalo en el frontend con `NEXT_PUBLIC_SWARM_TOKEN` (o en el navegador
+con `localStorage.setItem('swarm_token', '<token>')`). Sin token, los endpoints de
+escritura/ejecución quedan bloqueados.
+
 ---
 
 ## Chain de modelos (orden de prioridad)
@@ -120,14 +142,18 @@ Se cambia con el toggle ⚡/🔥 junto a la caja de texto. El agente avanza auto
 
 | Herramienta | Descripción |
 |-------------|-------------|
-| `read_file` | Lee cualquier archivo del proyecto |
+| `read_file` | Lee cualquier archivo del proyecto (secretos protegidos) |
 | `write_file` | Crea o sobreescribe un archivo |
 | `edit_file` | Edición quirúrgica (sustituye fragmento exacto) |
-| `list_directory` | Lista el contenido de una carpeta |
-| `search_code` | Búsqueda semántica en el proyecto |
-| `run_command` | Ejecuta comandos (pip, npm, pytest…) |
-| `fetch_url` | Descarga contenido de una URL HTTP |
-| `git_*` | Status, add, commit, log |
+| `apply_patch` | Edición multi-archivo/multi-hunk **atómica** (valida antes de escribir) |
+| `update_plan` / `read_plan` | Checklist persistente de la tarea |
+| `run_tests` | Autodetecta y ejecuta pytest o npm test |
+| `list_files` | Lista el contenido de una carpeta |
+| `grep_search` / `get_semantic_map` | Búsqueda de texto y mapa semántico (AST) |
+| `run_command` | Ejecuta comandos (pip, npm, pytest, ruff…) |
+| `fetch_url` | GET HTTP (con protección SSRF) |
+| `delegate_research` / `delegate_review` | Subagentes async (investigación / code review) |
+| `git_*` | Status, diff, commit, log, branch, push |
 
 ---
 
@@ -149,14 +175,20 @@ swarm-ide/
 ├── backend/
 │   ├── app/
 │   │   ├── main.py          # FastAPI — endpoints REST + WebSocket terminal
+│   │   ├── config.py        # Configuración central (host, token, límites, constantes)
+│   │   ├── security.py      # Auth, guard SSRF, bloqueo de comandos destructivos
 │   │   ├── graph.py         # LangGraph — agente ReAct con streaming SSE
-│   │   ├── smart_router.py  # Chain de 24 modelos, routing, fallback
-│   │   ├── tools.py         # Herramientas del agente (fs, git, cmd, http)
-│   │   ├── terminal.py      # WebSocket PTY nativo
-│   │   ├── cost_tracker.py  # Contador de tokens y coste USD
-│   │   ├── safe_fs.py       # Filesystem seguro + backups
+│   │   ├── runtime.py       # Estado por sesión/run (RouterState, RunContext, loop)
+│   │   ├── store.py         # Persistencia SQLite (runs, eventos, coste, historial)
+│   │   ├── smart_router.py  # Chain de 24 modelos, routing, fallback completo
+│   │   ├── tools.py         # Herramientas del agente (fs, git, cmd, http, plan, tests)
+│   │   ├── terminal.py      # WebSocket PTY nativo (con guard de comandos)
+│   │   ├── cost_tracker.py  # Precios y coste USD (alineado con el chain)
+│   │   ├── safe_fs.py       # Filesystem seguro + backups por hash
+│   │   ├── state_context.py # Tracking de mutaciones (State Guard)
 │   │   ├── diff_parser.py   # Resumen de diffs con IA
 │   │   └── ast_indexer.py   # Índice semántico del proyecto
+│   ├── tests/               # Suite pytest (routing, seguridad, coste, fs, store…)
 │   ├── requirements.txt
 │   └── test_models.py       # Test rápido de los 24 modelos
 ├── frontend/
@@ -182,6 +214,38 @@ python test_models.py
 ```
 
 Muestra latencia y estado (OK / FAIL / SIN CLAVE) para los 24 modelos del chain.
+
+---
+
+## Modo plataforma (opcional)
+
+El modo local de un clic no necesita nada de esto. Para escalar a multi-tenant:
+
+```bash
+docker compose up        # Postgres + Redis + API
+```
+
+Capacidades v5.0:
+
+- **Enjambre paralelo** — toggle 🐝 en la UI, o `POST /run/swarm` (planner → DAG → agentes en paralelo → revisión).
+- **Runs durables** — desconéctate y reconecta sin perder el run: `GET /api/runs/{id}/stream`, `POST /api/runs/{id}/cancel`.
+- **Sandbox** — `SWARM_SANDBOX=docker` ejecuta cada comando en un contenedor efímero, sin acceso al host. Construye la imagen con `make sandbox-image`.
+- **Persistencia** — `SWARM_DB=postgres` + `DATABASE_URL` (si no, SQLite local).
+- **Auth/RBAC** — define `SWARM_SECRET` y emite tokens con `POST /api/auth/token` (roles viewer/editor/owner).
+
+Ver `ARCHITECTURE.md` para el detalle y `.env.example` para todas las variables.
+
+## Tests
+
+La suite unitaria (55 tests) cubre routing/fallback, precios, bucles, auth/RBAC, SSRF, comandos,
+filesystem seguro, persistencia, sandbox endurecido, cola de trabajos, tenancy/cuotas, retrieval,
+scheduling del enjambre, checkpoints, grafo de dependencias, métricas y evals:
+
+```bash
+cd backend
+python -m pytest          # 55 tests
+make eval                 # arnés de evals (se omite sin claves)
+```
 
 ---
 
