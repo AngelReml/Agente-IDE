@@ -1,0 +1,22 @@
+# Imagen del sandbox de ejecución del agente (Fase 1).
+# Construir:  docker build -f Dockerfile.sandbox -t swarm-sandbox:latest .
+# El agente ejecuta cada comando dentro de un contenedor efímero basado en esta
+# imagen, con el workspace montado en /workspace, sin acceso al disco del host y
+# (por defecto) sin red. Incluye los runtimes que la whitelist permite.
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl ca-certificates build-essential \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir pytest ruff
+
+# Usuario no-root: el agente nunca corre como root dentro del sandbox.
+RUN useradd -m -u 1000 agent
+USER agent
+WORKDIR /workspace
+
+CMD ["bash"]

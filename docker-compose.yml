@@ -1,0 +1,49 @@
+# Plataforma Swarm IDE — stack de escalado (Fase 2/3/6).
+# Para uso local de un solo usuario NO necesitas esto: usa INICIAR.bat.
+# Este compose levanta Postgres + Redis + API para el camino multi-tenant.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: swarm
+      POSTGRES_PASSWORD: swarm
+      POSTGRES_DB: swarm
+    ports: ["5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U swarm"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    env_file: [.env]
+    environment:
+      SWARM_HOST: 0.0.0.0
+      SWARM_DB: postgres
+      DATABASE_URL: postgresql+psycopg://swarm:swarm@postgres:5432/swarm
+      REDIS_URL: redis://redis:6379/0
+      SWARM_SANDBOX: docker
+    ports: ["8000:8000"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    # El ejecutor docker del agente necesita el socket del host (Fase 1).
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pgdata:
