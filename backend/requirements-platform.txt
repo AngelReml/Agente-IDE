@@ -1,0 +1,15 @@
+# Optional platform dependencies (Fase 2/3/6). Core app runs without these.
+# Install with: pip install -r requirements-platform.txt
+
+# Persistence (Fase 2) — Postgres backend
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+
+# Job queue / pub-sub (Fase 2) — Redis-backed workers
+arq>=0.25
+redis>=5.0
+
+# Observability (Fase 6)
+opentelemetry-api>=1.25
+opentelemetry-sdk>=1.25
+opentelemetry-exporter-otlp>=1.25
