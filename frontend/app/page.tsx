@@ -9,7 +9,7 @@ import { OutputConsole }  from '@/components/OutputConsole'
 import { ApprovalModal }  from '@/components/ApprovalModal'
 import { Terminal }       from '@/components/Terminal'
 import { OutputEvent, Provider, FileCard } from '@/types'
-import { fetchFileContent, saveFileContent, runSwarmTask, checkHealth, selectModel, fetchChatContext, clearChatContext, fetchProject, switchProject, fetchRecentProjects, fetchRoutingMode, setRoutingMode } from '@/lib/api'
+import { fetchFileContent, saveFileContent, runSwarmTask, checkHealth, selectModel, fetchChatContext, clearChatContext, fetchProject, switchProject, fetchRecentProjects, fetchRoutingMode, setRoutingMode, fetchCost, fetchGitDiff, fetchDiffSummary } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 const MAX_EVENTS = 4000
@@ -104,6 +104,20 @@ export default function SwarmIDE() {
   const [activeProvider, setActiveProvider] = useState<Provider>(null)
   const [activeTool, setActiveTool]   = useState<string | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const sessionIdRef = useRef(`sess-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`)
+
+  // Populate a river card's summary from the real git diff (B4 — previously dead path).
+  const loadCardSummary = useCallback(async (filePath: string) => {
+    try {
+      const diff = await fetchGitDiff(filePath)
+      const summary = diff ? await fetchDiffSummary(filePath, diff) : null
+      if (summary) {
+        setFileCards((prev) => prev.map((c) => c.path === filePath ? { ...c, summary, loadingSummary: false } : c))
+      }
+    } catch {
+      /* leave card without summary */
+    }
+  }, [])
 
   // Output
   const [events, setEvents]           = useState<OutputEvent[]>([])
@@ -140,6 +154,9 @@ export default function SwarmIDE() {
 
   // Routing mode
   const [routingMode, setRoutingModeState] = useState<'fast' | 'power'>('fast')
+
+  // Swarm mode — parallel multi-agent orchestration (/run/swarm)
+  const [swarmMode, setSwarmMode] = useState(false)
 
   // Bottom panel
   const [bottomPanel, setBottomPanel] = useState<'console' | 'terminal'>('console')
@@ -286,6 +303,7 @@ export default function SwarmIDE() {
             if (pathMatch) {
               const filePath = pathMatch[1].trim()
               setFileCards((prev) => prev.map((c) => c.path === filePath ? { ...c, loadingSummary: false } : c))
+              loadCardSummary(filePath)
             } else {
               setFileCards((prev) => prev.map((c) => ({ ...c, loadingSummary: false })))
             }
@@ -306,11 +324,12 @@ export default function SwarmIDE() {
           }
           if (event.type === 'cost' && event.cost_usd !== undefined) {
             setRunCost(event.cost_usd)
-            setSessionCost((prev) => Math.max(prev, event.cost_usd ?? 0))
           }
           if (event.type === 'done') {
             setFileTreeRefresh((n) => n + 1)
             setAgentRefresh((n) => n + 1)
+            // B3: read the real cumulative session cost from the backend.
+            fetchCost().then((c) => setSessionCost(c.session.cost_usd)).catch(() => {})
             fetchChatContext().then((r) => setContextMsgCount(r.messages))
             const cur = activeFileRef.current
             if (cur) {
@@ -321,6 +340,8 @@ export default function SwarmIDE() {
           }
         },
         abortRef.current.signal,
+        sessionIdRef.current,
+        swarmMode ? '/run/swarm' : '/run',
       )
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
@@ -333,7 +354,7 @@ export default function SwarmIDE() {
       setIsRunning(false)
       setActiveTool(null)
     }
-  }, [task, isRunning])
+  }, [task, isRunning, swarmMode, loadCardSummary])
 
   const handleApprove = useCallback(() => {
     if (!pendingApproval) return
@@ -508,6 +529,21 @@ export default function SwarmIDE() {
                 : { background: 'rgba(201,149,74,0.10)', color: '#e0954a', border: '1px solid rgba(201,149,74,0.25)' }}
             >
               {routingMode === 'fast' ? '⚡' : '🔥'}
+            </button>
+
+            {/* Swarm toggle — single agent vs parallel multi-agent */}
+            <button
+              onClick={() => setSwarmMode((s) => !s)}
+              disabled={isRunning}
+              title={swarmMode
+                ? 'Modo Enjambre: planner + agentes en paralelo. Click → Agente único'
+                : 'Modo Agente único. Click → Enjambre (multi-agente paralelo)'}
+              className="flex-shrink-0 self-start mt-0.5 px-2 py-1.5 rounded text-[11px] font-cinzel font-semibold transition-all disabled:opacity-40 tracking-wide"
+              style={swarmMode
+                ? { background: 'rgba(155,122,205,0.12)', color: '#b89bdd', border: '1px solid rgba(155,122,205,0.30)' }
+                : { background: 'rgba(120,90,35,0.06)', color: 'rgba(160,120,40,0.55)', border: '1px solid rgba(160,120,40,0.20)' }}
+            >
+              {swarmMode ? '🐝' : '🜂'}
             </button>
 
             {/* Cast / Flee */}

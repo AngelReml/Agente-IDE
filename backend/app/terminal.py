@@ -12,6 +12,8 @@ from pathlib import Path
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from . import security
+
 logger = logging.getLogger(__name__)
 
 _IS_WIN = sys.platform == "win32"
@@ -143,6 +145,13 @@ async def handle_terminal_ws(websocket: WebSocket, initial_cwd: str) -> None:
                 await websocket.send_text(_prompt(cwd))
             else:
                 await websocket.send_text(f"\x1b[31mcd: {target}: No such directory\x1b[0m\r\n{_prompt(cwd)}")
+            continue
+
+        # Defence-in-depth: block genuinely destructive commands even in the terminal.
+        blocked = security.blocked_command(cmd)
+        if blocked:
+            await websocket.send_text(
+                f"\x1b[31mComando bloqueado por seguridad (patrón: {blocked})\x1b[0m\r\n{_prompt(cwd)}")
             continue
 
         # Regular command

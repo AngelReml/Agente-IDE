@@ -16,6 +16,8 @@ export type OutputEventType =
   | 'final'
   | 'context'
   | 'cost'
+  | 'run'
+  | 'plan'
 
 export interface OutputEvent {
   id: string
@@ -31,6 +33,8 @@ export interface OutputEvent {
   cost_usd?: number
   input_tokens?: number
   output_tokens?: number
+  run_id?: string
+  subtask?: string
   timestamp: number
 }
 
