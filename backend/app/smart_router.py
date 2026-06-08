@@ -1,7 +1,11 @@
 """
-Provider chain: Anthropic → OpenAI → Groq → OpenRouter (free models last resort)
-Skips providers whose API keys are absent.
-Never stops — always has a next model to try.
+Provider chain with priority routing and *complete* fallback.
+
+Key fix vs v3: routing state is no longer a single monotonic module-level index
+that could only move forward (which silently disabled the power models as a
+fallback in fast mode). Each run owns a RouterState whose candidate list contains
+EVERY available model in priority order, so advance() can always reach all of
+them. The module keeps a thin default state for the stateless info endpoints.
 """
 import os
 import asyncio
@@ -22,31 +26,16 @@ PROVIDER_COLORS = {
     "openrouter":"#7C3AED",
 }
 
-# Substrings that mean "this provider can't serve us right now" — advance to next model
 _RETRIABLE = frozenset([
-    # HTTP status codes
-    "429",                   # rate limit (universal)
-    "402",                   # payment required (DeepSeek, etc.)
-    # OpenAI / generic
-    "rate_limit_error",
-    "rate limit exceeded",
-    "insufficient_quota",
-    "quota exceeded",
-    "credit balance",
-    "billing_hard_limit",
-    "context_length_exceeded",
-    "maximum context length",
-    "model_not_found",
-    "model not found",
-    # Billing strings (DeepSeek, GLM)
-    "insufficient balance",
-    "no available balance",
-    # ZhipuAI-specific error codes
-    "1113",                  # 余额不足 — insufficient balance
-    "1211",                  # 无效的请求参数 — invalid params / deprecated model
-    # OpenRouter
-    "no endpoints found",
-    "provider returned error",
+    "429", "402", "500", "502", "503", "529",
+    "rate_limit_error", "rate limit exceeded", "rate_limit",
+    "insufficient_quota", "quota exceeded", "credit balance", "billing_hard_limit",
+    "context_length_exceeded", "maximum context length",
+    "model_not_found", "model not found",
+    "insufficient balance", "no available balance",
+    "overloaded", "overloaded_error", "service unavailable", "timeout", "timed out",
+    "1113", "1211",
+    "no endpoints found", "provider returned error",
 ])
 
 
@@ -67,80 +56,30 @@ class ModelEntry:
         return bool(os.getenv(self.key_env))
 
     def build(self):
+        common = dict(max_tokens=8192, temperature=0.4)
         if self.provider == "anthropic":
             from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(
-                model=self.model_id,
-                api_key=os.getenv("ANTHROPIC_API_KEY"),
-                max_tokens=8192,
-                temperature=0.5,
-            )
-        if self.provider == "openai":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model_id,
-                api_key=os.getenv("OPENAI_API_KEY"),
-                max_tokens=8192,
-                temperature=0.5,
-            )
+            return ChatAnthropic(model=self.model_id, api_key=os.getenv("ANTHROPIC_API_KEY"),
+                                 max_tokens=8192, temperature=0.4)
+        from langchain_openai import ChatOpenAI
+        base_urls = {
+            "groq":        "https://api.groq.com/openai/v1",
+            "glm":         "https://open.bigmodel.cn/api/paas/v4/",
+            "gemini":      "https://generativelanguage.googleapis.com/v1beta/openai/",
+            "deepseek":    "https://api.deepseek.com/v1",
+            "huggingface": "https://router.huggingface.co/v1",
+            "openrouter":  "https://openrouter.ai/api/v1",
+        }
+        kwargs = dict(model=self.model_id, api_key=os.getenv(self.key_env), **common)
         if self.provider == "groq":
-            from langchain_groq import ChatGroq
-            return ChatGroq(
-                model=self.model_id,
-                api_key=os.getenv("GROQ_API_KEY"),
-                max_tokens=32768,
-                temperature=0.5,
-            )
-        if self.provider == "glm":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model_id,
-                base_url="https://open.bigmodel.cn/api/paas/v4/",
-                api_key=os.getenv("GLM_API_KEY"),
-                max_tokens=8192,
-                temperature=0.5,
-            )
-        if self.provider == "gemini":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model_id,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-                api_key=os.getenv("GEMINI_API_KEY"),
-                max_tokens=8192,
-                temperature=0.5,
-            )
-        if self.provider == "deepseek":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model_id,
-                base_url="https://api.deepseek.com/v1",
-                api_key=os.getenv("DEEPSEEK_API_KEY"),
-                max_tokens=8192,
-                temperature=0.5,
-            )
-        if self.provider == "huggingface":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model_id,
-                base_url="https://router.huggingface.co/v1",
-                api_key=os.getenv("HF_TOKEN"),
-                max_tokens=8192,
-                temperature=0.5,
-            )
+            kwargs["max_tokens"] = 8192
+        if self.provider in base_urls:
+            kwargs["base_url"] = base_urls[self.provider]
         if self.provider == "openrouter":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(
-                model=self.model_id,
-                base_url="https://openrouter.ai/api/v1",
-                api_key=os.getenv("OPENROUTER_API_KEY"),
-                max_tokens=8192,
-                temperature=0.5,
-                default_headers={
-                    "HTTP-Referer": "http://localhost:3000",
-                    "X-Title": "Swarm IDE",
-                },
-            )
-        raise ValueError(f"Unknown provider: {self.provider}")
+            kwargs["default_headers"] = {
+                "HTTP-Referer": "http://localhost:3000", "X-Title": "Swarm IDE",
+            }
+        return ChatOpenAI(**kwargs)
 
     def info(self) -> dict:
         return {
@@ -152,62 +91,136 @@ class ModelEntry:
         }
 
 
-# ── Priority chain ────────────────────────────────────────────────────────────
+# ── Priority chain ──────────────────────────────────────────────────────────────
 CHAIN: List[ModelEntry] = [
-    # 1. Anthropic — best tool use, most reliable
     ModelEntry("anthropic", "claude-opus-4-5",   "Claude Opus 4.5",   "ANTHROPIC_API_KEY"),
     ModelEntry("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", "ANTHROPIC_API_KEY"),
     ModelEntry("anthropic", "claude-haiku-4-5",  "Claude Haiku 4.5",  "ANTHROPIC_API_KEY"),
-    # 2. OpenAI — strong coding capability
     ModelEntry("openai", "gpt-4o",      "GPT-4o",      "OPENAI_API_KEY"),
     ModelEntry("openai", "gpt-4o-mini", "GPT-4o Mini", "OPENAI_API_KEY"),
-    # 3. Groq — fast cheap inference
-    ModelEntry("groq", "llama-3.3-70b-versatile", "Llama 3.3 70B",  "GROQ_API_KEY"),
-    ModelEntry("groq", "llama-3.1-8b-instant",    "Llama 3.1 8B",   "GROQ_API_KEY"),  # 70b decommissioned
-    # 4. GLM (ZhipuAI) — strong coding, competitive pricing
+    ModelEntry("groq", "llama-3.3-70b-versatile", "Llama 3.3 70B", "GROQ_API_KEY"),
+    ModelEntry("groq", "llama-3.1-8b-instant",    "Llama 3.1 8B",  "GROQ_API_KEY"),
     ModelEntry("glm", "glm-4-plus",  "GLM-4 Plus",  "GLM_API_KEY"),
     ModelEntry("glm", "glm-4-air",   "GLM-4 Air",   "GLM_API_KEY"),
     ModelEntry("glm", "glm-4-flash", "GLM-4 Flash", "GLM_API_KEY"),
-    # 5. Gemini (Google) — strong multimodal reasoning (2.5-flash free tier confirmed working)
     ModelEntry("gemini", "gemini-2.5-flash", "Gemini 2.5 Flash", "GEMINI_API_KEY"),
     ModelEntry("gemini", "gemini-2.5-pro",   "Gemini 2.5 Pro",   "GEMINI_API_KEY"),
     ModelEntry("gemini", "gemini-2.0-flash", "Gemini 2.0 Flash", "GEMINI_API_KEY"),
-    # 6. DeepSeek — excellent coding, very cheap
-    ModelEntry("deepseek", "deepseek-chat",     "DeepSeek V3",  "DEEPSEEK_API_KEY"),
-    ModelEntry("deepseek", "deepseek-reasoner", "DeepSeek R1",  "DEEPSEEK_API_KEY"),
-    # 7. HuggingFace — cientos de modelos open-source, enrutamiento automático
+    ModelEntry("deepseek", "deepseek-chat",     "DeepSeek V3", "DEEPSEEK_API_KEY"),
+    ModelEntry("deepseek", "deepseek-reasoner", "DeepSeek R1", "DEEPSEEK_API_KEY"),
     ModelEntry("huggingface", "Qwen/Qwen2.5-Coder-32B-Instruct", "Qwen2.5 Coder 32B", "HF_TOKEN"),
     ModelEntry("huggingface", "Qwen/Qwen2.5-72B-Instruct",       "Qwen2.5 72B",       "HF_TOKEN"),
     ModelEntry("huggingface", "meta-llama/Llama-3.3-70B-Instruct","Llama 3.3 70B HF",  "HF_TOKEN"),
-    # 8. OpenRouter — paid
-    ModelEntry("openrouter", "anthropic/claude-sonnet-4-5",   "Claude Sonnet [OR]", "OPENROUTER_API_KEY"),
-    ModelEntry("openrouter", "google/gemini-2.5-pro",         "Gemini 2.5 Pro [OR]","OPENROUTER_API_KEY"),
-    ModelEntry("openrouter", "qwen/qwen3-235b-a22b",          "Qwen3 235B [OR]",    "OPENROUTER_API_KEY"),
-    # 8. OpenRouter — free (last resort, confirmed working)
-    ModelEntry("openrouter", "meta-llama/llama-3.3-70b-instruct:free",  "Llama 3.3 Free",   "OPENROUTER_API_KEY", is_free=True),
-    ModelEntry("openrouter", "meta-llama/llama-3.2-3b-instruct:free",   "Llama 3.2 3B Free","OPENROUTER_API_KEY", is_free=True),
-    ModelEntry("openrouter", "google/gemma-3-4b-it:free",               "Gemma 3 4B Free",  "OPENROUTER_API_KEY", is_free=True),
+    ModelEntry("openrouter", "anthropic/claude-sonnet-4-5", "Claude Sonnet [OR]",  "OPENROUTER_API_KEY"),
+    ModelEntry("openrouter", "google/gemini-2.5-pro",       "Gemini 2.5 Pro [OR]", "OPENROUTER_API_KEY"),
+    ModelEntry("openrouter", "qwen/qwen3-235b-a22b",        "Qwen3 235B [OR]",     "OPENROUTER_API_KEY"),
+    ModelEntry("openrouter", "meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 Free",   "OPENROUTER_API_KEY", is_free=True),
+    ModelEntry("openrouter", "meta-llama/llama-3.2-3b-instruct:free",  "Llama 3.2 3B Free","OPENROUTER_API_KEY", is_free=True),
+    ModelEntry("openrouter", "google/gemma-3-4b-it:free",             "Gemma 3 4B Free",  "OPENROUTER_API_KEY", is_free=True),
 ]
 
-# Thread-safe global state
-_lock = asyncio.Lock()
-_idx: int = 0
-_manually_set: bool = False  # True when user explicitly picked a model via /api/models/select
+POWER_PROVIDERS = ["anthropic", "openai", "gemini"]
+CHEAP_PROVIDERS = ["groq", "deepseek", "glm", "huggingface"]
 
-# ── Routing mode ──────────────────────────────────────────────────────────────
-# "fast"  → empieza en Groq/GLM/DeepSeek (barato, rápido). Ideal para tareas simples.
-# "power" → empieza en Anthropic/OpenAI (mejor calidad). Para tareas complejas.
+
+def available_indices() -> List[int]:
+    return [i for i, e in enumerate(CHAIN) if e.available()]
+
+
+def build_order(mode: str) -> List[int]:
+    """Full priority-ordered list of available model indices.
+
+    Every available model appears exactly once, so a RouterState built from this
+    can fall through to ALL of them — the bug that disabled power models as a
+    fast-mode fallback is gone.
+    """
+    avail = available_indices()
+
+    def group(providers, free=None):
+        out = []
+        for prov in providers:
+            for i in avail:
+                e = CHAIN[i]
+                if e.provider == prov and (free is None or e.is_free == free):
+                    out.append(i)
+        return out
+
+    if mode == "power":
+        primary, secondary = group(POWER_PROVIDERS), group(CHEAP_PROVIDERS)
+    else:
+        primary, secondary = group(CHEAP_PROVIDERS), group(POWER_PROVIDERS)
+
+    or_paid = [i for i in avail if CHAIN[i].provider == "openrouter" and not CHAIN[i].is_free]
+    or_free = [i for i in avail if CHAIN[i].provider == "openrouter" and CHAIN[i].is_free]
+
+    order: List[int] = []
+    for i in primary + secondary + or_paid + or_free + avail:
+        if i not in order:
+            order.append(i)
+    return order
+
+
+# ── Per-run router state ────────────────────────────────────────────────────────
+
+class RouterState:
+    """Owns a run's position in the priority order. Not shared between runs."""
+
+    def __init__(self, mode: str = "fast", start_model_id: str | None = None):
+        self.mode = mode if mode in ("fast", "power") else "fast"
+        self.order = build_order(self.mode)
+        self.ptr = 0
+        self.manual = False
+        if start_model_id:
+            self.set_model(start_model_id)
+
+    def current(self) -> Optional[ModelEntry]:
+        if not self.order or self.ptr >= len(self.order):
+            return None
+        return CHAIN[self.order[self.ptr]]
+
+    def info(self) -> dict:
+        e = self.current()
+        return e.info() if e else {"provider": None, "model": None, "display": "—",
+                                    "is_free": False, "color": "#6B7280"}
+
+    def build_model(self):
+        e = self.current()
+        if e is None:
+            raise RuntimeError("No hay modelos disponibles")
+        return e.build()
+
+    def advance(self) -> Optional[ModelEntry]:
+        if self.ptr + 1 >= len(self.order):
+            return None
+        self.ptr += 1
+        e = self.current()
+        if e:
+            logger.warning("Model switch → %s/%s", e.provider, e.model_id)
+        return e
+
+    def set_model(self, model_id: str) -> bool:
+        for pos, idx in enumerate(self.order):
+            if CHAIN[idx].model_id == model_id and CHAIN[idx].available():
+                self.ptr = pos
+                self.manual = True
+                return True
+        return False
+
+    def remaining(self) -> int:
+        return max(0, len(self.order) - self.ptr - 1)
+
+
+# ── Default state for the stateless info/admin endpoints ────────────────────────
+
 _routing_mode: str = "fast"
-
-_CHEAP_PROVIDERS  = {"groq", "glm", "deepseek", "huggingface"}
-_POWER_PROVIDERS  = {"anthropic", "openai", "gemini"}
+_manual_model_id: Optional[str] = None
+_lock = asyncio.Lock()
 
 
 def set_routing_mode(mode: str) -> str:
-    """Set routing mode: 'fast' or 'power'. Returns the new mode."""
     global _routing_mode
     if mode not in ("fast", "power"):
-        raise ValueError(f"Unknown mode: {mode}. Use 'fast' or 'power'.")
+        raise ValueError(f"Modo desconocido: {mode}. Usa 'fast' o 'power'.")
     _routing_mode = mode
     logger.info("Routing mode → %s", mode)
     return mode
@@ -217,131 +230,62 @@ def get_routing_mode() -> str:
     return _routing_mode
 
 
-def _start_index_for_mode() -> int:
-    """Return the chain index to start from based on _routing_mode."""
-    avail = _available()
-    if not avail:
-        return 0
-
-    if _routing_mode == "fast":
-        # First non-free cheap model (Groq > DeepSeek > GLM > HuggingFace)
-        order = ["groq", "deepseek", "glm", "huggingface"]
-        for prov in order:
-            for i in avail:
-                if CHAIN[i].provider == prov and not CHAIN[i].is_free:
-                    return i
-        # Fallback: first paid OpenRouter
-        for i in avail:
-            if CHAIN[i].provider == "openrouter" and not CHAIN[i].is_free:
-                return i
-        # Last resort: whatever is available first
-        return avail[0]
-
-    else:  # "power"
-        # Best heavy model (Anthropic > OpenAI > Gemini > rest)
-        order = ["anthropic", "openai", "gemini"]
-        for prov in order:
-            for i in avail:
-                if CHAIN[i].provider == prov:
-                    return i
-        return avail[0]
-
-
-def _available() -> List[int]:
-    return [i for i, e in enumerate(CHAIN) if e.available()]
+def _default_state() -> RouterState:
+    return RouterState(mode=_routing_mode, start_model_id=_manual_model_id)
 
 
 def current_info() -> dict:
-    return CHAIN[_idx].info()
-
-
-def current_model():
-    return CHAIN[_idx].build()
-
-
-async def advance() -> Optional[ModelEntry]:
-    """Advance to the next available model. Returns new entry or None if exhausted."""
-    global _idx
-    async with _lock:
-        avail = _available()
-        if not avail:
-            return None
-        # Find our position among available models
-        pos = next((i for i, idx in enumerate(avail) if idx > _idx), None)
-        if pos is None:
-            return None  # Already at last available
-        _idx = avail[pos]
-        entry = CHAIN[_idx]
-        logger.warning("Model switch → %s/%s", entry.provider, entry.model_id)
-        return entry
-
-
-def reset():
-    global _idx
-    _idx = 0
-
-
-def reset_for_run():
-    """Reset to the appropriate starting model for a fresh run based on routing mode.
-    Skips reset if the user manually selected a model (honours their choice once)."""
-    global _idx, _manually_set
-    if not _manually_set:
-        _idx = _start_index_for_mode()
-        entry = CHAIN[_idx]
-        logger.info("reset_for_run [%s] → %s/%s", _routing_mode, entry.provider, entry.model_id)
-    _manually_set = False  # always consume the flag so next run resets normally
+    return _default_state().info()
 
 
 async def set_model(model_id: str) -> bool:
-    """Select a specific model by its model_id. Returns True if found and available."""
-    global _idx, _manually_set
+    """Pin a model for the next run (consumed once)."""
+    global _manual_model_id
     async with _lock:
-        for i, entry in enumerate(CHAIN):
-            if entry.model_id == model_id and entry.available():
-                _idx = i
-                _manually_set = True
-                logger.info("Model manually set → %s/%s", entry.provider, entry.model_id)
+        for e in CHAIN:
+            if e.model_id == model_id and e.available():
+                _manual_model_id = model_id
+                logger.info("Model manually set → %s/%s", e.provider, e.model_id)
                 return True
     return False
 
 
+def consume_manual_model() -> Optional[str]:
+    global _manual_model_id
+    mid = _manual_model_id
+    _manual_model_id = None
+    return mid
+
+
+def reset() -> None:
+    global _manual_model_id
+    _manual_model_id = None
+
+
 def all_info() -> List[dict]:
-    return [
-        {**e.info(), "available": e.available()}
-        for e in CHAIN
-    ]
+    return [{**e.info(), "available": e.available()} for e in CHAIN]
 
 
-# ── Hybrid routing (cheap vs heavy) ──────────────────────────────────────────
-
-_HEAVY_PROVIDERS = {"anthropic", "openai", "gemini"}
-_CHEAP_PROVIDERS = {"groq", "glm", "deepseek", "huggingface"}
-_FREE_PROVIDERS  = {"openrouter"}
-
+# ── Helper models for subagents / diff summary (cheap & heavy) ──────────────────
 
 def get_cheap_model():
-    """Return the fastest available cheap model (Groq > DeepSeek > GLM > free OpenRouter)."""
     order = ["groq", "deepseek", "glm", "huggingface"]
     for prov in order:
-        for entry in CHAIN:
-            if entry.provider == prov and entry.available():
-                return entry.build()
-    # Fallback to free OpenRouter
-    for entry in CHAIN:
-        if entry.provider == "openrouter" and entry.is_free and entry.available():
-            return entry.build()
-    # Last resort: whatever is available
-    for entry in CHAIN:
-        if entry.available():
-            return entry.build()
-    raise RuntimeError("No models available for cheap routing")
+        for e in CHAIN:
+            if e.provider == prov and e.available():
+                return e.build()
+    for e in CHAIN:
+        if e.provider == "openrouter" and e.is_free and e.available():
+            return e.build()
+    for e in CHAIN:
+        if e.available():
+            return e.build()
+    raise RuntimeError("No hay modelos disponibles para routing económico")
 
 
 def get_heavy_model():
-    """Return the best available heavy model (Anthropic > OpenAI > Gemini)."""
-    order = ["anthropic", "openai", "gemini"]
-    for prov in order:
-        for entry in CHAIN:
-            if entry.provider == prov and entry.available():
-                return entry.build()
-    return current_model()
+    for prov in POWER_PROVIDERS:
+        for e in CHAIN:
+            if e.provider == prov and e.available():
+                return e.build()
+    return get_cheap_model()
