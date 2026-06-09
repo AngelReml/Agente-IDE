@@ -8,6 +8,7 @@ storage uses a hashed bucket per file to make backup-dir escape impossible.
 import hashlib
 import os
 import shutil
+import tempfile
 import time
 import difflib
 from pathlib import Path
@@ -39,9 +40,15 @@ def resolve_and_validate_path(path: str, allow_external: bool = False) -> str:
         resolved = str((Path(root) / rel).resolve())
 
     if not allow_external:
+        # Resolve symlinks on both sides and compare via commonpath (robust against
+        # the classic '/root' vs '/root-evil' prefix bug and against symlink escape).
         root_real = os.path.normcase(os.path.realpath(root))
-        target = os.path.normcase(resolved)
-        if target != root_real and not target.startswith(root_real + os.sep):
+        target = os.path.normcase(os.path.realpath(resolved))
+        try:
+            same = os.path.commonpath([root_real, target]) == root_real
+        except ValueError:
+            same = False  # different drive (Windows) → outside the project
+        if not same:
             raise ValueError(f"Acceso denegado: '{path}' está fuera de la raíz del proyecto.")
     return resolved
 
@@ -100,16 +107,30 @@ def write_file_safe(path: str, content: str, overwrite_external: bool = False) -
     if os.path.exists(resolved):
         if os.path.isdir(resolved):
             raise IsADirectoryError(f"'{path}' es un directorio, no se puede escribir.")
-        try:
-            with open(resolved, "r", encoding="utf-8", errors="replace") as f:
-                old_content = f.read()
-            backup_p = backup_file(resolved)
-        except Exception:
-            pass
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            old_content = f.read()
+        backup_p = backup_file(resolved)
+        if backup_p is None:
+            # Refuse to overwrite an existing file we couldn't back up — otherwise a
+            # crash mid-write would lose the original with no recovery point.
+            raise OSError(f"No se pudo crear backup de '{path}'; escritura abortada para evitar pérdida de datos.")
 
-    os.makedirs(os.path.dirname(resolved) or ".", exist_ok=True)
-    with open(resolved, "w", encoding="utf-8") as f:
-        f.write(content)
+    # Atomic write: write to a temp file in the same directory, then os.replace().
+    # A crash mid-write leaves the original intact instead of a truncated file.
+    # newline="" writes the content verbatim (no CRLF translation → no \r\r\n).
+    dirpath = os.path.dirname(resolved) or "."
+    os.makedirs(dirpath, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=dirpath, suffix=".swarmtmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(content)
+        os.replace(tmp, resolved)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
     diff_out = get_diff(old_content, content, os.path.basename(resolved))
     return resolved, diff_out, backup_p

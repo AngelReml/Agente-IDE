@@ -12,9 +12,9 @@ def test_gemini_25_is_priced():
 
 
 def test_cost_of_math():
-    # opus: 15 in / 75 out per 1M
+    # opus 4.5: 5 in / 25 out per 1M → 1M+1M tokens = 30.0
     c = cost_tracker.cost_of("anthropic", "claude-opus-4-5", 1_000_000, 1_000_000)
-    assert round(c, 2) == 90.0
+    assert round(c, 2) == 30.0
 
 
 def test_unknown_model_is_free():
@@ -82,8 +82,10 @@ def test_parse_diff_stats():
 
 def test_resolve_rejects_external_when_disallowed():
     import pytest
+    # Use an OS-appropriate absolute path OUTSIDE the project root.
+    external = r"C:\Windows\System32\drivers\etc\hosts" if os.name == "nt" else "/etc/passwd"
     with pytest.raises(ValueError):
-        safe_fs.resolve_and_validate_path("/etc/passwd", allow_external=False)
+        safe_fs.resolve_and_validate_path(external, allow_external=False)
 
 
 def test_write_then_backup_then_restore(tmp_path, monkeypatch):

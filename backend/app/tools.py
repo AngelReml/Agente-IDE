@@ -51,7 +51,9 @@ def _git(args: list) -> str:
 
 
 def _is_secret(path: str) -> bool:
-    return os.path.basename(path) in config.SECRET_FILES
+    # Resolve symlinks + case-fold the basename, and match .env*/keys/credentials —
+    # not just an exact basename, which `.ENV`, trailing spaces or a symlink evade.
+    return config.is_secret_path(path)
 
 
 # ── File system tools ─────────────────────────────────────────────────────────

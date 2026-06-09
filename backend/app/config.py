@@ -5,6 +5,7 @@ All tunables live here so they can be overridden via environment variables
 and so the rest of the codebase stops hard-coding magic numbers and paths.
 """
 import os
+import re
 from pathlib import Path
 from functools import lru_cache
 
@@ -72,6 +73,32 @@ SKIP_DIRS = frozenset({
 # Files that must never be served into the file tree or opened in the editor.
 SECRET_FILES = frozenset({".env", ".env.local", ".env.production", ".env.development"})
 
+# Broader secret detection: any .env variant, private keys, credential files.
+# Matched against the case-folded basename of the RESOLVED path (resists `.ENV`,
+# trailing spaces and symlinks), not just the literal SECRET_FILES set.
+_SECRET_PATTERNS = tuple(re.compile(p, re.IGNORECASE) for p in (
+    r"^\.env(\..+)?$",          # .env, .env.local, .env.anything
+    r".*\.pem$", r".*\.key$", r".*\.pfx$", r".*\.p12$",
+    r"^id_rsa.*", r"^id_ecdsa.*", r"^id_ed25519.*",
+    r".*credentials?(\..+)?$", r"^\.npmrc$", r"^\.pypirc$", r"^\.git-credentials$",
+))
+
+
+def is_secret_path(path: str) -> bool:
+    """True if `path` points at a secrets file. Resolves symlinks and compares the
+    case-folded basename, so `.ENV`, `note -> .env` and `dir/.env ` are all caught."""
+    try:
+        base = os.path.basename(os.path.realpath(path))
+    except Exception:
+        base = os.path.basename(path)
+    base = base.strip().lower()
+    if not base:
+        return False
+    if base in {s.lower() for s in SECRET_FILES}:
+        return True
+    return any(p.match(base) for p in _SECRET_PATTERNS)
+
+
 INDEXED_EXTS = frozenset({'.py', '.ts', '.tsx', '.js', '.jsx', '.go', '.rs', '.java'})
 
 
@@ -83,6 +110,11 @@ RECURSION_LIMIT = 80
 LOOP_WINDOW = 8          # how many recent tool calls to inspect for loops
 LOOP_WARN = 3            # warn after N repeats of the same call within the window
 LOOP_ABORT = 6           # abort after N repeats
+
+# Durable-run registry bounds (prevent unbounded memory growth in RunManager).
+RUN_EVENT_BUFFER = 5_000   # max events kept in memory per run for replay
+MAX_RETAINED_RUNS = 200    # max finished runs kept in memory (LRU eviction)
+SESSION_TTL_SECONDS = 6 * 3600  # idle sessions pruned after this
 
 
 # ── SSRF guard ──────────────────────────────────────────────────────────────────

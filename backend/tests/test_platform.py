@@ -67,7 +67,8 @@ def test_sandbox_local_by_default():
 
 
 def test_local_backend_runs(tmp_path):
-    res = sandbox.LocalBackend().run(["python3", "-c", "print('hola')"], cwd=str(tmp_path), timeout=30)
+    import sys
+    res = sandbox.LocalBackend().run([sys.executable, "-c", "print('hola')"], cwd=str(tmp_path), timeout=30)
     assert res.returncode == 0 and "hola" in res.stdout
 
 

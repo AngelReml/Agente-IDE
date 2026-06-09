@@ -5,10 +5,12 @@ The threat model changed in v4: the backend can now be bound to the LAN
 (SWARM_HOST=0.0.0.0). When it is, every mutating/executing surface must be
 authenticated, and the filesystem/command/network reach must be constrained.
 """
+import hmac
 import ipaddress
 import re
 import socket
 import shlex
+import sys
 from urllib.parse import urlparse
 
 from fastapi import Header, HTTPException, WebSocket
@@ -28,17 +30,12 @@ def _token_ok(provided: str | None) -> bool:
     # Accept "Bearer <token>" or the raw token.
     if provided.startswith("Bearer "):
         provided = provided[7:]
-    # Constant-time-ish comparison.
+    # Timing-safe comparison (stdlib; never short-circuits on content).
     return _consteq(provided.strip(), expected)
 
 
 def _consteq(a: str, b: str) -> bool:
-    if len(a) != len(b):
-        return False
-    result = 0
-    for x, y in zip(a, b):
-        result |= ord(x) ^ ord(y)
-    return result == 0
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 def require_auth(authorization: str | None = Header(default=None)) -> None:
@@ -100,19 +97,27 @@ def validate_outbound_url(url: str) -> str | None:
 # but we still block genuinely destructive single commands as defence-in-depth.
 
 _BLOCKED_PATTERNS = [
-    r"\brm\b[\s\S]*-[\w]*r[\w]*\s",     # rm with a recursive flag (any order/spacing)
+    r"\brm\b[\s\S]*-[\w]*r[\w]*\b",      # rm with a recursive flag (any order/spacing)
+    r"\brm\b[\s\S]*--recursive",         # rm --recursive (long form)
     r"\brmdir\b\s+/[sS]",
     r"\bdel\b\s+/[sS]",
+    r"\bRemove-Item\b[\s\S]*(-Recurse|-r\b)",  # PowerShell recursive delete
     r"\bformat\b\s+[A-Za-z]:",
-    r"\bfdisk\b", r"\bmkfs\b", r"\bdd\b\s+if=",
-    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b",
+    r"\bFormat-Volume\b", r"\bClear-Disk\b",
+    r"\bfdisk\b", r"\bmkfs\b",
+    r"\bdd\b\s+(if|of)=",                # dd reading from or writing to a device
+    r"\bshutdown\b", r"\breboot\b", r"\bhalt\b", r"\bStop-Computer\b",
     r":\(\)\s*\{",                       # fork bomb
-    r"\bgit\b.*\bpush\b.*--force",       # destructive push
+    r"\bgit\b.*\bpush\b.*(--force|--force-with-lease|\s-f\b)",  # destructive push
 ]
 
 
 def blocked_command(command: str) -> str | None:
-    """Return the matched dangerous pattern, or None if the command is acceptable."""
+    """Return the matched dangerous pattern, or None if the command is acceptable.
+
+    NOTE: this is defence-in-depth, NOT a security boundary. A denylist over a raw
+    string cannot stop a determined caller (e.g. `python -c "..."`). Real isolation
+    must come from the sandbox (SWARM_SANDBOX=docker)."""
     for pattern in _BLOCKED_PATTERNS:
         if re.search(pattern, command, re.IGNORECASE):
             return pattern
@@ -120,4 +125,6 @@ def blocked_command(command: str) -> str | None:
 
 
 def tokenize(command: str) -> list[str]:
-    return shlex.split(command, posix=True)
+    # On Windows, posix=True mangles backslash paths (C:\Users\…); use non-posix
+    # there so the tokens we validate match what actually runs.
+    return shlex.split(command, posix=(sys.platform != "win32"))

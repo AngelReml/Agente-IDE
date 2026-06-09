@@ -7,6 +7,7 @@ Per-run accounting moved to runtime.RunCost; this module owns the pricing
 function and the cumulative session total.
 """
 import logging
+import threading
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
@@ -14,9 +15,9 @@ logger = logging.getLogger(__name__)
 
 _PRICING: Dict[str, Dict[str, Tuple[float, float]]] = {
     "anthropic": {
-        "claude-opus-4-5":   (15.0, 75.0),
+        "claude-opus-4-5":   (5.0,  25.0),   # Opus 4.5 pricing (was wrongly the Opus 4.1 tier 15/75)
         "claude-sonnet-4-5": (3.0,  15.0),
-        "claude-haiku-4-5":  (0.25, 1.25),
+        "claude-haiku-4-5":  (1.0,  5.0),    # Haiku 4.5 pricing (was 4× too low at 0.25/1.25)
     },
     "openai": {
         "gpt-4o":      (2.50, 10.0),
@@ -70,21 +71,24 @@ class _Stats:
 
 _session = _Stats()
 _last_run = _Stats()
+_lock = threading.Lock()  # record() runs from the tool threadpool → guard the accumulators
 
 
 def record(provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
     """Add usage to the session total and return the cost of this call."""
     cost = cost_of(provider, model, input_tokens, output_tokens)
-    _session.input_tokens += input_tokens
-    _session.output_tokens += output_tokens
-    _session.cost_usd += cost
+    with _lock:
+        _session.input_tokens += input_tokens
+        _session.output_tokens += output_tokens
+        _session.cost_usd += cost
     return cost
 
 
 def set_last_run(stats: dict) -> None:
-    _last_run.input_tokens = stats.get("input_tokens", 0)
-    _last_run.output_tokens = stats.get("output_tokens", 0)
-    _last_run.cost_usd = stats.get("cost_usd", 0.0)
+    with _lock:
+        _last_run.input_tokens = stats.get("input_tokens", 0)
+        _last_run.output_tokens = stats.get("output_tokens", 0)
+        _last_run.cost_usd = stats.get("cost_usd", 0.0)
 
 
 def run_stats() -> dict:
