@@ -10,7 +10,6 @@ from langchain_core.messages import (
     messages_from_dict,
     messages_to_dict,
 )
-from langgraph.prebuilt import create_react_agent
 
 from . import config, cost_tracker, memoria_manager, prompts, runtime, smart_router, state_context, store
 from .config import project_root
@@ -179,6 +178,9 @@ async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGener
                "provider": info["provider"], "color": info["color"], "is_free": info["is_free"]}
 
         try:
+            # Imported lazily so the module's lightweight helpers (history counts,
+            # session reset) stay importable without langgraph installed (CI, tests).
+            from langgraph.prebuilt import create_react_agent
             agent = create_react_agent(model=entry.build(), tools=ALL_TOOLS, prompt=_build_system_prompt())
             loop_abort = False
 
