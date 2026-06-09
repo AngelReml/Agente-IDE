@@ -127,6 +127,11 @@ def retrieval_backend() -> str:
     return os.getenv("SWARM_RETRIEVAL", "tfidf").lower()
 
 
+def embedding_model() -> str:
+    """OpenAI-compatible embedding model used when SWARM_RETRIEVAL=embeddings."""
+    return os.getenv("SWARM_EMBED_MODEL", "text-embedding-3-small")
+
+
 # ── SSRF guard ──────────────────────────────────────────────────────────────────
 # fetch_url refuses these unless SWARM_ALLOW_PRIVATE_FETCH=1.
 

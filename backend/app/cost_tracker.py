@@ -21,6 +21,8 @@ _PRICING: dict[str, dict[str, tuple[float, float]]] = {
     "openai": {
         "gpt-4o":      (2.50, 10.0),
         "gpt-4o-mini": (0.15, 0.60),
+        "text-embedding-3-small": (0.02, 0.0),   # retrieval embeddings (Fase 4)
+        "text-embedding-3-large": (0.13, 0.0),
     },
     "groq": {
         "llama-3.3-70b-versatile": (0.59, 0.79),

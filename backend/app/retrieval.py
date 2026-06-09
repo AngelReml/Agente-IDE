@@ -7,6 +7,7 @@ chunks instead of a raw file dump — better quality and lower token cost. The
 TF-IDF implementation works offline today and is fully unit-tested.
 """
 import hashlib
+import json
 import logging
 import math
 import os
@@ -134,11 +135,135 @@ class TfidfRetriever:
         return scored[:k]
 
 
+# ── Embeddings backend (Fase 4): semantic retrieval ─────────────────────────────
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+class _EmbedCache:
+    """Persistent chunk→vector cache keyed by sha1(text): unchanged code is never
+    re-embedded across rebuilds (saves API cost and latency)."""
+
+    def __init__(self, root: str) -> None:
+        self._path = os.path.join(root, ".swarm", "embeddings_cache.json")
+        self._data: dict[str, list[float]] = {}
+        self._loaded = False
+
+    def _load(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                self._data = json.load(f)
+        except Exception:
+            self._data = {}
+
+    @staticmethod
+    def _key(text: str) -> str:
+        return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+    def get(self, text: str) -> list[float] | None:
+        self._load()
+        return self._data.get(self._key(text))
+
+    def put_many(self, pairs) -> None:
+        self._load()
+        for text, vec in pairs:
+            self._data[self._key(text)] = vec
+
+    def save(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
+            with open(self._path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f)
+        except Exception:
+            logger.debug("could not persist embedding cache", exc_info=True)
+
+
+def _openai_embed(texts: list[str]) -> list[list[float]]:
+    """Embed texts with the configured OpenAI embedding model; records cost."""
+    from openai import OpenAI
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    model = config.embedding_model()
+    resp = client.embeddings.create(model=model, input=texts)
+    try:
+        from . import cost_tracker
+        cost_tracker.record("openai", model, getattr(resp.usage, "total_tokens", 0) or 0, 0)
+    except Exception:
+        pass
+    return [d.embedding for d in resp.data]
+
+
+class EmbeddingRetriever:
+    """Semantic retriever: embeds symbol chunks and ranks by cosine similarity.
+    `embed_fn` is injectable so it's unit-testable without network/cost."""
+
+    name = "embeddings"
+
+    def __init__(self, embed_fn=None, cache: _EmbedCache | None = None) -> None:
+        self._embed = embed_fn or _openai_embed
+        self._cache = cache
+        self._chunks: list[Chunk] = []
+        self._vecs: list[list[float]] = []
+
+    def add_chunks(self, path: str, chunks: list[tuple[int, str]]) -> None:
+        blocks = [(s, t) for s, t in chunks if t.strip()]
+        if not blocks:
+            return
+        vecs: list[list[float] | None] = []
+        to_embed: list[str] = []
+        idx_map: list[int] = []
+        for i, (_s, t) in enumerate(blocks):
+            cached = self._cache.get(t) if self._cache else None
+            vecs.append(cached)
+            if cached is None:
+                idx_map.append(i)
+                to_embed.append(t)
+        if to_embed:
+            fresh = self._embed(to_embed)  # one batched call for the uncached chunks
+            for j, vec in zip(idx_map, fresh, strict=False):
+                vecs[j] = vec
+            if self._cache:
+                self._cache.put_many(zip(to_embed, fresh, strict=False))
+                self._cache.save()
+        for (s, t), v in zip(blocks, vecs, strict=True):
+            if v is not None:
+                self._chunks.append(Chunk(path, s, t))
+                self._vecs.append(v)
+
+    def add(self, path: str, content: str) -> None:
+        self.add_chunks(path, symbol_chunks(content, os.path.splitext(path)[1].lower()))
+
+    def query(self, q: str, k: int = 5) -> list[Hit]:
+        if not self._vecs:
+            return []
+        qv = self._embed([q])[0]
+        scored: list[Hit] = []
+        for chunk, v in zip(self._chunks, self._vecs, strict=True):
+            score = _cosine(qv, v)
+            if score > 0:
+                snippet = "\n".join(chunk.text.splitlines()[:8])
+                scored.append(Hit(chunk.path, chunk.start_line, round(score, 4), snippet))
+        scored.sort(key=lambda h: h.score, reverse=True)
+        return scored[:k]
+
+
 def make_retriever() -> Retriever:
-    """Select the retrieval backend by flag. TF-IDF today; 'embeddings' (Fase 4)
-    falls back to TF-IDF until implemented (so the flag is safe to set early)."""
+    """Select the retrieval backend by flag. 'embeddings' needs OPENAI_API_KEY;
+    without it (or on any error) it falls back to TF-IDF, so the flag is always safe."""
     if config.retrieval_backend() == "embeddings":
-        logger.info("SWARM_RETRIEVAL=embeddings aún no implementado (Fase 4); usando TF-IDF.")
+        if os.getenv("OPENAI_API_KEY"):
+            try:
+                return EmbeddingRetriever(cache=_EmbedCache(config.project_root()))
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("EmbeddingRetriever no disponible (%s); usando TF-IDF.", e)
+        else:
+            logger.info("SWARM_RETRIEVAL=embeddings sin OPENAI_API_KEY; usando TF-IDF.")
     return TfidfRetriever()
 
 

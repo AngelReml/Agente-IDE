@@ -25,10 +25,11 @@ def test_retrieval_backend_defaults_to_tfidf(monkeypatch):
     assert isinstance(retrieval.make_retriever(), retrieval.TfidfRetriever)
 
 
-def test_embeddings_flag_falls_back_safely(monkeypatch):
+def test_embeddings_flag_falls_back_without_key(monkeypatch):
     monkeypatch.setenv("SWARM_RETRIEVAL", "embeddings")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     from app import retrieval
-    # Not implemented yet (Fase 4) → must fall back to a working retriever, not crash.
+    # No embedding key → fall back to TF-IDF rather than crash.
     assert isinstance(retrieval.make_retriever(), retrieval.TfidfRetriever)
 
 
