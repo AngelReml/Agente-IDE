@@ -178,7 +178,7 @@ def _sse(run_id: str):
 @app.post("/run", dependencies=[Depends(require_auth)])
 async def run_task(request: TaskRequest):
     metrics.M.inc("swarm_runs_total", mode="single")
-    run_id = await _runs.start(request.task, request.session_id)
+    run_id = await _runs.start(request.task, request.session_id, mode="single")
     return _sse(run_id)
 
 
@@ -186,7 +186,8 @@ async def run_task(request: TaskRequest):
 async def run_swarm_task(request: TaskRequest):
     """Parallel multi-agent run (planner → DAG → specialised agents)."""
     metrics.M.inc("swarm_runs_total", mode="swarm")
-    run_id = await _runs.start(request.task, request.session_id, agent=orchestrator.run_orchestrated)
+    run_id = await _runs.start(request.task, request.session_id,
+                               agent=orchestrator.run_orchestrated, mode="swarm")
     return _sse(run_id)
 
 

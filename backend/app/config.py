@@ -205,6 +205,11 @@ def database_url() -> str:
     return os.getenv("DATABASE_URL", "")
 
 
+def redis_url() -> str:
+    """Redis DSN for the job queue + run event bus. Empty → in-process (local)."""
+    return os.getenv("REDIS_URL", "")
+
+
 # ── Command execution ───────────────────────────────────────────────────────────
 
 ALLOWED_COMMANDS = frozenset({

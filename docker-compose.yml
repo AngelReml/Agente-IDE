@@ -67,6 +67,10 @@ services:
       timeout: 3s
       retries: 10
 
+  # La API NO ejecuta el agente ni toca Docker (Fase 6, paso 4): solo encola los
+  # runs en Redis y hace de tail del bus de eventos hacia el cliente (SSE). El
+  # ejecutor real es el servicio `worker`. Por eso aquí NO hay SWARM_SANDBOX ni
+  # DOCKER_HOST ni dependencia del socket-proxy.
   api:
     build:
       context: ./backend
@@ -77,22 +81,44 @@ services:
       SWARM_DB: postgres
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-      SWARM_SANDBOX: docker
       # Retrieval semántico persistido en el Postgres con pgvector (Fase 7). Requiere
       # OPENAI_API_KEY en .env; sin clave, el retriever cae a TF-IDF automáticamente.
       SWARM_RETRIEVAL: ${SWARM_RETRIEVAL:-embeddings}
       SWARM_VECTOR_STORE: pgvector
-      # La API NO monta el socket: habla con el daemon solo a través del proxy
-      # con allowlist. El cliente `docker` lee DOCKER_HOST del entorno.
-      DOCKER_HOST: tcp://docker-proxy:2375
-      # Runtime endurecido opcional (gVisor) para aislamiento multi-tenant fuerte.
-      # Vacío = runc por defecto. Requiere el runtime instalado en el host del daemon.
-      SWARM_SANDBOX_RUNTIME: ${SWARM_SANDBOX_RUNTIME:-}
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
+
+  # Ejecutor out-of-process: el ÚNICO servicio con acceso a Docker (vía el proxy).
+  # Consume runs de la cola Arq, ejecuta el enjambre en contenedores efímeros y
+  # publica los eventos en Redis para que la API los retransmita. Reutiliza la
+  # imagen de la API cambiando el comando.
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.api
+    command: ["arq", "app.worker.WorkerSettings"]
+    env_file: [.env]
+    environment:
+      SWARM_DB: postgres
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      SWARM_RETRIEVAL: ${SWARM_RETRIEVAL:-embeddings}
+      SWARM_VECTOR_STORE: pgvector
+      SWARM_SANDBOX: docker
+      # Habla con el daemon solo a través del proxy con allowlist (nunca el socket
+      # crudo). El cliente `docker` lee DOCKER_HOST del entorno.
+      DOCKER_HOST: tcp://docker-proxy:2375
+      # Runtime endurecido opcional (gVisor) para aislamiento multi-tenant fuerte.
+      SWARM_SANDBOX_RUNTIME: ${SWARM_SANDBOX_RUNTIME:-}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
       docker-proxy: { condition: service_healthy }
+    # arq no expone HTTP; el healthcheck por curl de la imagen no aplica.
+    healthcheck:
+      disable: true
 
 volumes:
   pgdata:

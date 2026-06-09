@@ -37,10 +37,13 @@ _VOLATILE_EVENT_TYPES = frozenset({"token", "_end"})
 
 
 class _Run:
-    def __init__(self, run_id: str, session_id: str = "default", task: str = ""):
+    def __init__(self, run_id: str, session_id: str = "default", task: str = "", remote: bool = False):
         self.run_id = run_id
         self.session_id = session_id
         self.task = task
+        # Remote runs execute in the Arq worker; their events arrive via the run bus,
+        # not the in-process driver, so this _Run is just a routing/registry handle.
+        self.remote = remote
         # Bounded buffer: a reconnecting client replays the recent tail, not an
         # unbounded history that would eventually OOM the process.
         self.events: deque[dict] = deque(maxlen=config.RUN_EVENT_BUFFER)
@@ -91,12 +94,32 @@ class RunManager:
         except Exception:  # pragma: no cover - persistence must never break a run
             logger.debug("run persistence (%s) failed for %s", phase, run.run_id, exc_info=True)
 
+    def _remote_queue(self):
+        """The Redis queue if execution should happen out-of-process, else None.
+        When None (no REDIS_URL / arq), runs execute in-process exactly as before."""
+        try:
+            from . import queue
+            q = queue.get_queue()
+            return q if getattr(q, "name", "") == "redis" else None
+        except Exception:  # pragma: no cover - defensive
+            return None
+
     async def start(self, task: str, session_id: str = "default",
-                    agent: AgentFactory | None = None) -> str:
+                    agent: AgentFactory | None = None, mode: str = "single") -> str:
+        run_id = uuid.uuid4().hex[:12]
+
+        remote_q = self._remote_queue()
+        if remote_q is not None:
+            # Out-of-process: the API only enqueues; the worker (the sole process with
+            # Docker/proxy access) runs the swarm and publishes events to the run bus.
+            self._runs[run_id] = _Run(run_id, session_id, task, remote=True)
+            self._evict()
+            await remote_q.enqueue_named("run_swarm_job", task, session_id, run_id, mode)
+            return run_id
+
         agent_fn = agent or self._agent
         if agent_fn is None:
             raise RuntimeError("RunManager sin agente configurado")
-        run_id = uuid.uuid4().hex[:12]
         run = _Run(run_id, session_id, task)
         self._runs[run_id] = run
         self._evict()
@@ -132,6 +155,12 @@ class RunManager:
         run = self._runs.get(run_id)
         if run is None:
             return
+        if run.remote:
+            # Events live in the run bus (worker → Redis Stream); replay + tail there.
+            from . import runbus
+            async for ev in runbus.get_bus().subscribe(run_id):
+                yield ev
+            return
         # Register the live queue BEFORE snapshotting the backlog, so an event
         # published in between is captured by the queue rather than lost. We then
         # de-duplicate by skipping queued events already present in the backlog.
@@ -164,6 +193,8 @@ class RunManager:
 
     def cancel(self, run_id: str) -> bool:
         run = self._runs.get(run_id)
+        if run and run.remote:
+            return False  # remote cancellation (worker abort) not yet supported
         if run and run.task_handle and not run.task_handle.done():
             run.task_handle.cancel()
             return True
