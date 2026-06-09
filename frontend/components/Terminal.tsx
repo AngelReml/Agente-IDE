@@ -2,8 +2,18 @@
 
 import { useEffect, useRef, useState, useCallback, KeyboardEvent } from 'react'
 import { cn } from '@/lib/utils'
+import { authToken } from '@/lib/api'
 
 const WS_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000').replace(/^http/, 'ws')
+
+// The browser WebSocket API can't send an Authorization header, so when the
+// backend is exposed and a token is configured we pass it as a query param —
+// otherwise the handshake is rejected (1008) and the terminal silently fails.
+function wsTerminalUrl(): string {
+  const base = `${WS_URL}/ws/terminal`
+  const t = authToken()
+  return t ? `${base}?token=${encodeURIComponent(t)}` : base
+}
 
 // ── ANSI colour map ──────────────────────────────────────────────────────────
 
@@ -77,6 +87,7 @@ export function Terminal({ className }: Props) {
   const [histIdx, setHistIdx]   = useState(-1)
   const [connected, setConnected] = useState(false)
   const wsRef   = useRef<WebSocket | null>(null)
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef  = useRef<HTMLInputElement>(null)
 
@@ -93,28 +104,27 @@ export function Terminal({ className }: Props) {
     })
   }, [])
 
-  // Connect to WebSocket
-  useEffect(() => {
-    const connect = () => {
-      const ws = new WebSocket(`${WS_URL}/ws/terminal`)
-      wsRef.current = ws
-
-      ws.onopen = () => {
-        setConnected(true)
-        setLines([])
-      }
-      ws.onmessage = (e) => appendRaw(e.data as string)
-      ws.onclose = () => {
-        setConnected(false)
-        appendRaw('\x1b[2m\r\n[Conexión cerrada — click Reconectar]\x1b[0m\r\n')
-      }
-      ws.onerror = () => {
-        setConnected(false)
-      }
+  // Single source of truth for opening the socket (used by mount AND reconnect),
+  // so handlers (incl. onerror) and the token are wired consistently.
+  const openSocket = useCallback(() => {
+    const ws = new WebSocket(wsTerminalUrl())
+    wsRef.current = ws
+    ws.onopen = () => { setConnected(true); setLines([]) }
+    ws.onmessage = (e) => appendRaw(e.data as string)
+    ws.onclose = () => {
+      setConnected(false)
+      appendRaw('\x1b[2m\r\n[Conexión cerrada — click Reconectar]\x1b[0m\r\n')
     }
-    connect()
-    return () => wsRef.current?.close()
+    ws.onerror = () => { setConnected(false) }
   }, [appendRaw])
+
+  useEffect(() => {
+    openSocket()
+    return () => {
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+      wsRef.current?.close()
+    }
+  }, [openSocket])
 
   // Auto-scroll
   useEffect(() => {
@@ -162,16 +172,11 @@ export function Terminal({ className }: Props) {
     }
   }, [input, history, send, appendRaw])
 
-  const reconnect = () => {
+  const reconnect = useCallback(() => {
     wsRef.current?.close()
-    setTimeout(() => {
-      const ws = new WebSocket(`${WS_URL}/ws/terminal`)
-      wsRef.current = ws
-      ws.onopen = () => { setConnected(true); setLines([]) }
-      ws.onmessage = (e) => appendRaw(e.data as string)
-      ws.onclose = () => { setConnected(false) }
-    }, 100)
-  }
+    if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
+    reconnectTimer.current = setTimeout(openSocket, 100)
+  }, [openSocket])
 
   return (
     <div className={cn('flex flex-col h-full', className)} style={{ background: '#050609' }}>

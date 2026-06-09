@@ -8,7 +8,7 @@ const uid = () => `e${++_counter}-${Date.now()}`
 // ── Auth ────────────────────────────────────────────────────────────────────────
 // Token is needed only when the backend is exposed beyond localhost (SWARM_AUTH_TOKEN).
 // Source: NEXT_PUBLIC_SWARM_TOKEN at build time, or localStorage('swarm_token') at runtime.
-function authToken(): string | null {
+export function authToken(): string | null {
   if (typeof window !== 'undefined') {
     const t = window.localStorage.getItem('swarm_token')
     if (t) return t
