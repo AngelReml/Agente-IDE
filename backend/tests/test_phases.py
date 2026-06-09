@@ -62,6 +62,42 @@ def test_preflight_local_unaffected(monkeypatch):
     assert ok and msg == "sandbox=local"
 
 
+def _fake_proc(returncode=0, stderr=b""):
+    class _R:
+        pass
+    r = _R()
+    r.returncode = returncode
+    r.stderr = stderr
+    r.stdout = b""
+    return r
+
+
+def test_preflight_validates_runtime_ok(monkeypatch):
+    monkeypatch.setenv("SWARM_SANDBOX", "docker")
+    monkeypatch.setenv("SWARM_SANDBOX_RUNTIME", "runsc")
+    monkeypatch.setattr(sandbox, "docker_available", lambda: True)
+    # image inspect → ok, runtime smoke run → ok
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: _fake_proc(0))
+    ok, msg = sandbox.preflight()
+    assert ok and "runtime=runsc" in msg
+
+
+def test_preflight_fails_when_runtime_missing(monkeypatch):
+    monkeypatch.setenv("SWARM_SANDBOX", "docker")
+    monkeypatch.setenv("SWARM_SANDBOX_RUNTIME", "runsc")
+    monkeypatch.setattr(sandbox, "docker_available", lambda: True)
+
+    def fake_run(args, **k):
+        # image inspect passes; the runtime smoke run fails clearly.
+        if args[:3] == ["docker", "image", "inspect"]:
+            return _fake_proc(0)
+        return _fake_proc(125, b"unknown runtime specified runsc")
+
+    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    ok, msg = sandbox.preflight()
+    assert not ok and "runsc" in msg and "no disponible" in msg
+
+
 def test_sandbox_resource_limits_default_matches_config(monkeypatch):
     # Default limits reproduce the historic hardcoded quota exactly (no regression).
     for v in ("SWARM_SANDBOX_CPUS", "SWARM_SANDBOX_PIDS", "SWARM_SANDBOX_MEMORY"):

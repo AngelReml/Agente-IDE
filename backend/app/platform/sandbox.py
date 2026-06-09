@@ -121,8 +121,21 @@ def preflight() -> tuple[bool, str]:
             return False, f"sandbox=docker: imagen '{img}' no encontrada (make sandbox-image)"
     except Exception as e:  # pragma: no cover
         return False, f"sandbox=docker: error {e}"
+    runtime = config.sandbox_runtime()
+    if runtime:
+        # Validate the hardened runtime really exists by spinning one throwaway
+        # container — `docker info` (which lists runtimes) is blocked by the
+        # socket-proxy, and we must fail-fast at startup, not on the first command.
+        try:
+            r = subprocess.run(["docker", "run", "--rm", "--runtime", runtime, img, "true"],
+                               capture_output=True, timeout=30)
+            if r.returncode != 0:
+                detail = (r.stderr or b"").decode(errors="replace").strip()[:200]
+                return False, f"sandbox=docker: runtime '{runtime}' no disponible ({detail})"
+        except Exception as e:
+            return False, f"sandbox=docker: no se pudo validar runtime '{runtime}': {e}"
     via = f" via {config.docker_host()}" if config.docker_host() else ""
-    rt = f" runtime={config.sandbox_runtime()}" if config.sandbox_runtime() else ""
+    rt = f" runtime={runtime}" if runtime else ""
     return True, f"sandbox=docker img={img}{rt}{via}"
 
 
