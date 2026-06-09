@@ -70,12 +70,19 @@ def _startup() -> None:
     if not config.is_loopback_only():
         # Exposed to the network: refuse the dangerous combinations rather than
         # degrade silently. The agent can run arbitrary commands, so an exposed
-        # server with the no-isolation local sandbox is remote code execution.
-        if config.sandbox_mode() == "local" and os.getenv("SWARM_ALLOW_INSECURE_LOCAL_SANDBOX") != "1":
+        # server that runs the agent IN-PROCESS with the no-isolation local sandbox
+        # is remote code execution. When runs are delegated to the worker, the API
+        # never executes the agent, so a local sandbox here is not an RCE risk.
+        if config.insecure_exposed_sandbox(
+                loopback=False,
+                executes_locally=not _runs.is_remote(),
+                mode=config.sandbox_mode(),
+                allow=os.getenv("SWARM_ALLOW_INSECURE_LOCAL_SANDBOX") == "1"):
             raise RuntimeError(
-                "SWARM_HOST no es loopback con SWARM_SANDBOX=local: el agente ejecutaría "
-                "comandos sin aislamiento en el host (RCE). Usa SWARM_SANDBOX=docker, o "
-                "fija SWARM_ALLOW_INSECURE_LOCAL_SANDBOX=1 si asumes el riesgo conscientemente.")
+                "SWARM_HOST no es loopback con SWARM_SANDBOX=local y ejecución in-process: "
+                "el agente correría comandos sin aislamiento en el host (RCE). Usa "
+                "SWARM_SANDBOX=docker, delega la ejecución al worker (REDIS_URL), o fija "
+                "SWARM_ALLOW_INSECURE_LOCAL_SANDBOX=1 si asumes el riesgo conscientemente.")
         if config.auth_token() is None:
             logger.warning("⚠️  SWARM_HOST no es loopback y SWARM_AUTH_TOKEN no está definido. "
                            "Los endpoints de escritura/ejecución quedarán BLOQUEADOS hasta que definas un token.")

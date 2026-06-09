@@ -56,6 +56,21 @@ def test_docker_available_uses_version_not_info(monkeypatch):
     assert calls and calls[0][:2] == ["docker", "version"]
 
 
+def test_insecure_exposed_sandbox_guard():
+    from app import config
+    f = config.insecure_exposed_sandbox
+    # Exposed + in-process + local sandbox + not allowed → RCE risk (refuse boot).
+    assert f(loopback=False, executes_locally=True, mode="local", allow=False) is True
+    # Loopback (local single-user) → safe regardless.
+    assert f(loopback=True, executes_locally=True, mode="local", allow=False) is False
+    # Execution delegated to the worker → API never runs the agent → safe.
+    assert f(loopback=False, executes_locally=False, mode="local", allow=False) is False
+    # Docker sandbox → isolated → safe.
+    assert f(loopback=False, executes_locally=True, mode="docker", allow=False) is False
+    # Explicit opt-in → caller accepts the risk.
+    assert f(loopback=False, executes_locally=True, mode="local", allow=True) is False
+
+
 def test_preflight_local_unaffected(monkeypatch):
     monkeypatch.setenv("SWARM_SANDBOX", "local")
     ok, msg = sandbox.preflight()

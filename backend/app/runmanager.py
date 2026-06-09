@@ -68,15 +68,18 @@ class RunManager:
         self._persist = persist
 
     def _evict(self) -> None:
-        """Keep memory bounded: drop the oldest FINISHED runs beyond the cap.
-        Active runs are never evicted."""
+        """Keep memory bounded: drop the oldest evictable run beyond the cap. A run
+        is evictable when it's FINISHED, or REMOTE — remote runs are just routing
+        handles (their events live in the run bus + store), so they must not pin the
+        registry forever just because the API never sees their completion. In-flight
+        LOCAL runs (holding an asyncio task + buffer) are never evicted."""
         while len(self._runs) > config.MAX_RETAINED_RUNS:
             for rid, r in self._runs.items():
-                if r.done:
+                if r.done or r.remote:
                     self._runs.pop(rid, None)
                     break
             else:
-                break  # nothing finished to evict yet
+                break  # nothing evictable yet (all in-flight local runs)
 
     def _store(self, phase: str, run: "_Run", ev: dict | None = None) -> None:
         """Best-effort persistence. Never raises into the run."""
@@ -103,6 +106,11 @@ class RunManager:
             return q if getattr(q, "name", "") == "redis" else None
         except Exception:  # pragma: no cover - defensive
             return None
+
+    def is_remote(self) -> bool:
+        """True when runs are delegated to the worker (so this process never executes
+        the agent itself). Used by the startup RCE guard."""
+        return self._remote_queue() is not None
 
     async def start(self, task: str, session_id: str = "default",
                     agent: AgentFactory | None = None, mode: str = "single") -> str:
@@ -160,6 +168,7 @@ class RunManager:
             from . import runbus
             async for ev in runbus.get_bus().subscribe(run_id):
                 yield ev
+            run.done = True  # stream closed (_END) → mark finished for active()/eviction
             return
         # Register the live queue BEFORE snapshotting the backlog, so an event
         # published in between is captured by the queue rather than lost. We then

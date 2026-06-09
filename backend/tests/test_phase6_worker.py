@@ -96,6 +96,22 @@ def test_runmanager_enqueues_and_tails_when_remote(monkeypatch):
     assert "info" in types and "done" in types and "_end" not in types
 
 
+def test_remote_runs_do_not_leak_registry(monkeypatch):
+    # Regression: remote runs never set done=True (no in-process driver), so an
+    # eviction policy that only drops `done` runs would grow the registry forever.
+    fake_q = _FakeRedisQueue()
+    monkeypatch.setattr(RunManager, "_remote_queue", lambda self: fake_q)
+    monkeypatch.setattr("app.config.MAX_RETAINED_RUNS", 5)
+
+    async def scenario():
+        mgr = RunManager(agent_factory=None, persist=False)
+        for _ in range(20):
+            await mgr.start("t", "s", mode="single")
+        return len(mgr._runs)
+
+    assert asyncio.run(scenario()) <= 5  # bounded despite 20 remote runs enqueued
+
+
 # ── Worker job: drives the agent, publishes to the bus, persists ─────────────────
 
 class _FakeStore:

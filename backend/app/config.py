@@ -210,6 +210,16 @@ def redis_url() -> str:
     return os.getenv("REDIS_URL", "")
 
 
+def insecure_exposed_sandbox(loopback: bool, executes_locally: bool, mode: str, allow: bool) -> bool:
+    """RCE guard (pure, for testing): True when a network-exposed server would run
+    the agent IN-PROCESS with the no-isolation local sandbox. When execution is
+    delegated to the worker (executes_locally=False), the API never runs the agent,
+    so a local sandbox here is not an RCE risk."""
+    if loopback or not executes_locally or allow:
+        return False
+    return mode == "local"
+
+
 # ── Command execution ───────────────────────────────────────────────────────────
 
 ALLOWED_COMMANDS = frozenset({
