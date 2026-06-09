@@ -188,18 +188,27 @@ multi-tenant real el ejecutor del agente necesita aislamiento fuerte.
 
 ## Secuenciación y entregables
 
-| Fase | Workstream | Esfuerzo | Entregable verificable |
-|------|------------|----------|------------------------|
-| 1 | A1 — router/coste por sesión | 🟢 | 2 sesiones concurrentes aisladas (test) |
-| 2 | A2 — historial/State Guard por sesión | 🟡 | sin cross-talk entre pestañas (test) |
-| 3 | B1 — interfaz Retriever + chunking AST | 🟢 | flag tfidf↔embeddings, default igual |
-| 4 | B2 — embeddings + caché + store local | 🟡 | recall@k mejor en evals, offline intacto |
-| 5 | C1 — socket-proxy + DOCKER_HOST | 🟡 | API sin socket crudo; proxy con allowlist |
-| 6 | C2 — runtime aislado (gVisor) + worker | 🔴 | comando confinado; ejecución out-of-process |
-| 7 | B3 — pgvector (plataforma) | 🟡 | retrieval escalado sobre el Postgres existente |
+| Fase | Workstream | Esfuerzo | Estado | Entregable verificable |
+|------|------------|----------|--------|------------------------|
+| 1 | A1 — router/coste por sesión | 🟢 | ✅ | 2 sesiones concurrentes aisladas (test) |
+| 2 | A2 — historial/State Guard por sesión | 🟡 | ✅ | sin cross-talk entre pestañas (test) |
+| 3 | B1 — interfaz Retriever + chunking AST | 🟢 | ✅ | flag tfidf↔embeddings, default igual |
+| 4 | B2 — embeddings + caché + store local | 🟡 | ✅ | recall@k mejor en evals, offline intacto |
+| 5 | C1 — socket-proxy + DOCKER_HOST | 🟡 | ✅ | API sin socket crudo; proxy con allowlist |
+| 6 | C2 — runtime aislado (gVisor) + cuotas | 🔴 | ◑ | runtime por flag + cuotas/workspace (falta worker out-of-process) |
+| 7 | B3 — pgvector (plataforma) | 🟡 | ✅ | retrieval escalado sobre el Postgres existente |
 
 Cada fase: rama propia, tests nuevos, feature-flag, y el modo local de un clic
 **nunca se rompe**. Total estimado: ~3-5 semanas de trabajo enfocado.
+
+### Estado a 9 jun 2026
+Fases 1–5 y 7 **completas**; Fase 6 **parcial** (◑): `--runtime` endurecido por
+`SWARM_SANDBOX_RUNTIME` y cuotas de recursos por workspace (`tenancy.limits_for`)
+están hechas y testeadas; queda el paso 4 (mover la ejecución del sandbox a un
+worker out-of-process para que la API solo encole). Suite: 98 tests en verde.
+
+Flags introducidos: `SWARM_SANDBOX_RUNTIME`, `DOCKER_HOST`, `SWARM_SANDBOX_CPUS`,
+`SWARM_SANDBOX_PIDS`, `SWARM_VECTOR_STORE` (memory|pgvector), `SWARM_EMBED_DIM`.
 
 ## Qué NO cambia
 El arranque local (`INICIAR.bat`), la experiencia de un solo usuario, y los valores
