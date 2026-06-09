@@ -17,7 +17,6 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Awaitable, Callable, Optional
 
-from . import config
 
 logger = logging.getLogger(__name__)
 

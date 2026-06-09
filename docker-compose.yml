@@ -1,27 +1,34 @@
 # Plataforma Swarm IDE — stack de escalado (Fase 2/3/6).
 # Para uso local de un solo usuario NO necesitas esto: usa INICIAR.bat.
 # Este compose levanta Postgres + Redis + API para el camino multi-tenant.
+#
+# SEGURIDAD: las credenciales se toman del entorno (.env, NO versionado). El
+# compose FALLA si no las defines, para que nadie arranque con 'swarm/swarm'.
+# Define en tu .env: POSTGRES_PASSWORD=<fuerte> y REDIS_PASSWORD=<fuerte>.
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: swarm
-      POSTGRES_PASSWORD: swarm
-      POSTGRES_DB: swarm
-    ports: ["5432:5432"]
+      POSTGRES_USER: ${POSTGRES_USER:-swarm}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?define POSTGRES_PASSWORD en tu .env}
+      POSTGRES_DB: ${POSTGRES_DB:-swarm}
+    # Solo accesible desde el host local, no publicado a toda la red.
+    ports: ["127.0.0.1:5432:5432"]
     volumes: ["pgdata:/var/lib/postgresql/data"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U swarm"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-swarm}"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   redis:
     image: redis:7-alpine
-    ports: ["6379:6379"]
+    # Redis con contraseña obligatoria (antes estaba SIN auth).
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?define REDIS_PASSWORD en tu .env}"]
+    ports: ["127.0.0.1:6379:6379"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -34,16 +41,20 @@ services:
     environment:
       SWARM_HOST: 0.0.0.0
       SWARM_DB: postgres
-      DATABASE_URL: postgresql+psycopg://swarm:swarm@postgres:5432/swarm
-      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       SWARM_SANDBOX: docker
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-    # El ejecutor docker del agente necesita el socket del host (Fase 1).
+    # El ejecutor docker del agente necesita hablar con el daemon. Montar el socket
+    # crudo da control TOTAL del host (escape de contenedor → root). En producción
+    # usa un socket-proxy con allowlist (p.ej. tecnativa/docker-socket-proxy) o un
+    # runtime rootless (sysbox/gVisor). Aquí lo montamos en SOLO LECTURA como
+    # mitigación parcial; revísalo antes de exponer este stack.
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock:ro
 
 volumes:
   pgdata:

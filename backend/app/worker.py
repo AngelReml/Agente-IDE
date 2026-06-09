@@ -14,11 +14,16 @@ async def run_swarm_job(ctx, task: str, session_id: str = "default") -> dict:  #
     from . import graph, store, runtime
     rc = runtime.new_run(task, session_id)
     store.start_run(rc.run_id, session_id, task)
-    last = {}
-    async for ev in graph.run_swarm_stream(task, session_id):
-        store.record_event(rc.run_id, ev.get("type", ""), ev.get("content", ""), ev.get("tool"))
-        last = ev
-    store.finish_run(rc.run_id, "done", rc.provider, rc.model, rc.cost.stats())
+    last: dict = {}
+    status = "error"
+    try:
+        async for ev in graph.run_swarm_stream(task, session_id):
+            store.record_event(rc.run_id, ev.get("type", ""), ev.get("content", ""), ev.get("tool"))
+            last = ev
+        status = "done"
+    finally:
+        # Always close the run — a crash used to leave it stuck in 'running' forever.
+        store.finish_run(rc.run_id, status, rc.provider, rc.model, rc.cost.stats())
     return {"run_id": rc.run_id, "final": last}
 
 

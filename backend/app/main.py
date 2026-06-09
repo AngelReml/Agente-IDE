@@ -1,6 +1,5 @@
 import os
 import json
-import shutil
 import logging
 import asyncio
 import subprocess
@@ -20,8 +19,8 @@ from .graph import run_swarm_stream, clear_session_messages, session_message_cou
 from .smart_router import current_info, all_info, reset, set_model, set_routing_mode, get_routing_mode
 from .tools import ensure_project
 from . import (safe_fs, diff_parser, ast_indexer, cost_tracker, store, config, security, auth,
-               orchestrator, metrics, checkpoints, tenancy)
-from .config import project_root, SKIP_DIRS, MAX_FILE_BYTES, SECRET_FILES
+               orchestrator, metrics, checkpoints)
+from .config import project_root, SKIP_DIRS, MAX_FILE_BYTES
 from .security import require_auth
 from .runmanager import RunManager
 from .platform import sandbox
@@ -239,7 +238,7 @@ def get_file(path: str = Query(..., max_length=500)):
     try:
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             return {"path": path, "content": f.read()}
-    except Exception as exc:
+    except Exception:
         logger.exception("get_file failed for %s", path)
         raise HTTPException(500, "No se pudo leer el archivo")
 
@@ -268,7 +267,7 @@ def post_file(req: FileWriteRequest):
     # Atomic, backed-up write (was a raw truncating open that could corrupt on crash).
     try:
         safe_fs.write_file_safe(req.path, req.content, overwrite_external=False)
-    except Exception as exc:
+    except Exception:
         logger.exception("post_file failed for %s", req.path)
         raise HTTPException(500, "No se pudo escribir el archivo")
     return {"status": "ok", "path": req.path}

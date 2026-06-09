@@ -33,7 +33,7 @@ class PostgresBackend:
     name = "postgres"
 
     def __init__(self, url: str):
-        from sqlalchemy import create_engine  # noqa: imported lazily
+        from sqlalchemy import create_engine  # imported lazily to keep deps optional
         self.engine = create_engine(url, pool_pre_ping=True, future=True)
         self._ensure_schema()
 
@@ -95,10 +95,11 @@ class PostgresBackend:
 @lru_cache(maxsize=1)
 def get_backend():
     if config.db_backend() == "postgres" and config.database_url():
-        try:
-            be = PostgresBackend(config.database_url())
-            logger.info("Persistence backend: postgres")
-            return be
-        except Exception as e:
-            logger.warning("Postgres no disponible (%s) — usando SQLite", e)
+        # Fail FAST: do not silently fall back to a local SQLite that would diverge
+        # from the shared DB and lose data across instances. Raising leaves the
+        # lru_cache empty (it doesn't cache exceptions), so a later call retries
+        # once Postgres is reachable again.
+        be = PostgresBackend(config.database_url())
+        logger.info("Persistence backend: postgres")
+        return be
     return SqliteBackend()

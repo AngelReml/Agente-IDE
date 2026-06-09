@@ -1,7 +1,6 @@
 import os
 import time
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List
 
 MEMORIA_FILENAME = "memoria.md"
 
