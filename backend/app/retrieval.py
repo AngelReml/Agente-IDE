@@ -6,9 +6,11 @@ chunks instead of a raw file dump — better quality and lower token cost. The
 `Retriever` interface leaves room for an embeddings backend (pgvector) later; the
 TF-IDF implementation works offline today and is fully unit-tested.
 """
+import hashlib
 import math
 import os
 import re
+import threading
 from collections import Counter
 from dataclasses import dataclass
 
@@ -105,9 +107,52 @@ def build_repo_retriever(root: str, max_files: int = 400) -> TfidfRetriever:
     return r
 
 
+# ── Cached retriever (rebuilding on every query was O(repo) per call) ───────────
+
+_CACHE: dict[str, tuple[str, "TfidfRetriever"]] = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def _repo_signature(root: str, max_files: int = 400) -> str:
+    """Cheap stat-only fingerprint (path:mtime:size). Changes when any indexed
+    file is added/removed/edited, so we can reuse the built index otherwise."""
+    parts: list[str] = []
+    count = 0
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in config.SKIP_DIRS]
+        for fname in files:
+            if os.path.splitext(fname)[1].lower() not in config.INDEXED_EXTS:
+                continue
+            fp = os.path.join(dirpath, fname)
+            try:
+                st = os.stat(fp)
+            except OSError:
+                continue
+            parts.append(f"{os.path.relpath(fp, root)}:{int(st.st_mtime)}:{st.st_size}")
+            count += 1
+            if count >= max_files:
+                break
+        if count >= max_files:
+            break
+    return hashlib.sha1("|".join(sorted(parts)).encode()).hexdigest()
+
+
+def get_repo_retriever(root: str, max_files: int = 400) -> "TfidfRetriever":
+    """Return a cached retriever for `root`, rebuilding only when files changed."""
+    sig = _repo_signature(root, max_files)
+    with _CACHE_LOCK:
+        cached = _CACHE.get(root)
+        if cached and cached[0] == sig:
+            return cached[1]
+    r = build_repo_retriever(root, max_files)
+    with _CACHE_LOCK:
+        _CACHE[root] = (sig, r)
+    return r
+
+
 def retrieve_context(query: str, root: str | None = None, k: int = 5) -> str:
     root = root or config.project_root()
-    hits = build_repo_retriever(root).query(query, k)
+    hits = get_repo_retriever(root).query(query, k)
     if not hits:
         return ""
     out = ["CONTEXTO RELEVANTE (retrieval):"]

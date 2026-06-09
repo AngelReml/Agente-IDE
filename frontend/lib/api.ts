@@ -125,7 +125,8 @@ export async function runSwarmTask(
             tool: parsed.tool, model: parsed.model, provider: parsed.provider, color: parsed.color,
             old_model: parsed.old_model, new_model: parsed.new_model, is_free: parsed.is_free,
             cost_usd: parsed.cost_usd, input_tokens: parsed.input_tokens, output_tokens: parsed.output_tokens,
-            run_id: parsed.run_id,
+            run_id: parsed.run_id, subtask: parsed.subtask,
+            path: parsed.path, needs_confirmation: parsed.needs_confirmation,
             timestamp: Date.now(),
           })
         } catch {

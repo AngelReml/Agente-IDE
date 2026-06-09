@@ -287,18 +287,35 @@ def _parse_event(event: dict, model_info: dict) -> dict | None:
         return {"type": "token", "content": content}
 
     if etype == "on_tool_start":
-        return {"type": "tool_start", "tool": name, "content": _tool_preview(name, data.get("input", {}))}
+        inp = data.get("input", {})
+        return {"type": "tool_start", "tool": name, "path": _tool_path(name, inp),
+                "content": _tool_preview(name, inp)}
 
     if etype == "on_tool_end":
         output = str(data.get("output", ""))
+        # Structured flag so the UI doesn't have to grep the human string.
+        needs_confirmation = "CONFIRMACION REQUERIDA" in output
         if len(output) > 400:
             output = output[:400] + "…"
-        return {"type": "tool_end", "tool": name, "content": output}
+        return {"type": "tool_end", "tool": name, "path": _tool_path(name, data.get("input", {})),
+                "needs_confirmation": needs_confirmation, "content": output}
 
     if etype == "on_chain_end" and name == "LangGraph":
         final = _extract_final(data)
         if final:
             return {"type": "final", "content": final}
+    return None
+
+
+def _tool_path(tool_name: str, inp: dict) -> str | None:
+    """The file path a tool operates on, as a structured field (so the UI doesn't
+    parse it out of the human preview string)."""
+    if not isinstance(inp, dict):
+        return None
+    if tool_name in ("write_file", "edit_file", "read_file", "delete_file", "preview_changes"):
+        return inp.get("path")
+    if tool_name == "move_file":
+        return inp.get("dst") or inp.get("src")
     return None
 
 

@@ -282,8 +282,8 @@ export default function SwarmIDE() {
           if (event.type === 'tool_start' && event.tool) {
             setActiveTool(event.tool)
             if (event.tool === 'write_file') {
-              const pathMatch = event.content.match(/^(.+?)\s*\(/)
-              const filePath  = pathMatch ? pathMatch[1].trim() : event.content
+              // Prefer the structured `path` field; regex is just a fallback.
+              const filePath  = event.path ?? (event.content.match(/^(.+?)\s*\(/)?.[1]?.trim() ?? event.content)
               const filename  = filePath.split(/[/\\]/).pop() ?? filePath
               const card: FileCard = { path: filePath, filename, timestamp: Date.now(), loadingSummary: true }
               setFileCards((prev) => {
@@ -293,15 +293,14 @@ export default function SwarmIDE() {
             }
           }
 
-          if (event.type === 'tool_end' && event.content?.includes('⚠️ CONFIRMACION REQUERIDA')) {
+          if (event.type === 'tool_end' && (event.needs_confirmation || event.content?.includes('CONFIRMACION REQUERIDA'))) {
             setPendingApproval(event.content)
             abortRef.current?.abort()
           }
 
           if (event.type === 'tool_end' && event.tool === 'write_file') {
-            const pathMatch = event.content.match(/^✅\s+(.+?)\s*\(/)
-            if (pathMatch) {
-              const filePath = pathMatch[1].trim()
+            const filePath = event.path ?? (event.content.match(/^✅\s+(.+?)\s*\(/)?.[1]?.trim() ?? null)
+            if (filePath) {
               setFileCards((prev) => prev.map((c) => c.path === filePath ? { ...c, loadingSummary: false } : c))
               loadCardSummary(filePath)
             } else {

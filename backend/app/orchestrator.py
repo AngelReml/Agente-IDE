@@ -192,8 +192,10 @@ async def _run_subtask(st: SubTask, root_task: str, context: dict[str, str],
     # Retrieval-augmented context for implementation roles (Fase 4).
     if st.role in ("coder", "architect"):
         try:
+            import asyncio
             from . import retrieval
-            rc = retrieval.retrieve_context(st.goal, k=4)
+            # Off the event loop: building/scanning the repo is blocking I/O.
+            rc = await asyncio.to_thread(retrieval.retrieve_context, st.goal, None, 4)
             if rc:
                 ctx_block += "\n\n" + rc
         except Exception:

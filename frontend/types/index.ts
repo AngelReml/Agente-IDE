@@ -35,6 +35,8 @@ export interface OutputEvent {
   output_tokens?: number
   run_id?: string
   subtask?: string
+  path?: string                 // structured file path for file tools
+  needs_confirmation?: boolean  // structured flag for "confirmation required"
   timestamp: number
 }
 
