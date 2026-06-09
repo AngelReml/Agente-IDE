@@ -120,6 +120,13 @@ MAX_SUBTASKS = 12              # hard cap on subtasks parsed from a plan
 MAX_SWARM_CONCURRENCY = 4      # max subagents running at once within a batch
 
 
+# ── Retrieval backend (architecture plan, Fase 3/4) ─────────────────────────────
+
+def retrieval_backend() -> str:
+    """'tfidf' (default, offline, no deps) or 'embeddings' (semantic, Fase 4)."""
+    return os.getenv("SWARM_RETRIEVAL", "tfidf").lower()
+
+
 # ── SSRF guard ──────────────────────────────────────────────────────────────────
 # fetch_url refuses these unless SWARM_ALLOW_PRIVATE_FETCH=1.
 

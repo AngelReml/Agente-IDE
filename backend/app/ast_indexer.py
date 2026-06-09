@@ -69,6 +69,12 @@ def _index_js(content: str) -> list[dict[str, Any]]:
     return symbols
 
 
+def symbols_for(content: str, ext: str) -> list[dict[str, Any]]:
+    """Public helper: symbols (with start line) for in-memory content, used by the
+    retriever to chunk code along function/class boundaries."""
+    return _index_python(content, "<mem>") if ext == ".py" else _index_js(content)
+
+
 def build_index(project_root: str) -> dict[str, Any]:
     index: dict[str, Any] = {
         "generated_at": int(time.time()),
