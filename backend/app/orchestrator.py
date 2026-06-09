@@ -244,6 +244,9 @@ async def _run_subtask(st: SubTask, root_task: str, context: dict[str, str],
 async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGenerator[dict, None]:
     import asyncio
 
+    from . import state_context
+    state_context.set_session(session_id)  # tools of all subagents track this session
+
     yield {"type": "info", "content": "🧠 Planificando el enjambre…"}
     subtasks = await plan(task)
     yield {"type": "plan", "content": render_plan(subtasks), "plan": [s.__dict__ for s in subtasks]}

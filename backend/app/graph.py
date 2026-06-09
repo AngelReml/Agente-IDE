@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ── Session history (now persisted per-project via store) ───────────────────────
 
-_session_messages: list[BaseMessage] = []
+_history: dict[str, list[BaseMessage]] = {}  # per-session, lazy-loaded from store
 
 
 def _trim_tool(msg: ToolMessage) -> ToolMessage:
@@ -37,42 +37,33 @@ def _trim_tool(msg: ToolMessage) -> ToolMessage:
     return ToolMessage(content=c, tool_call_id=msg.tool_call_id, name=name)
 
 
-def _load_history() -> None:
-    global _session_messages
-    try:
-        data = store.load_history_raw()
-        if data:
-            _session_messages = messages_from_dict(data)
-            logger.info("Loaded %d messages from session history", len(_session_messages))
-    except Exception as e:
-        logger.warning("Could not load session history: %s", e)
+def _get_history(session_id: str = "default") -> list[BaseMessage]:
+    if session_id not in _history:
+        try:
+            data = store.load_history_raw(session_id)
+            _history[session_id] = messages_from_dict(data) if data else []
+        except Exception as e:
+            logger.warning("Could not load session history for %s: %s", session_id, e)
+            _history[session_id] = []
+    return _history[session_id]
 
 
-def _save_history() -> None:
-    try:
-        store.save_history_raw(messages_to_dict(_session_messages))
-    except Exception as e:
-        logger.warning("Could not save session history: %s", e)
+def clear_session_messages(session_id: str = "default") -> None:
+    _history[session_id] = []
+    store.clear_history(session_id)
 
 
-def clear_session_messages() -> None:
-    global _session_messages
-    _session_messages = []
-    store.clear_history()
+def session_message_count(session_id: str = "default") -> int:
+    return len(_get_history(session_id))
 
 
-def session_message_count() -> int:
-    return len(_session_messages)
-
-
-def _update_session_history(all_messages: list) -> None:
-    global _session_messages
+def _update_session_history(session_id: str, all_messages: list) -> None:
     trimmed = [_trim_tool(m) if isinstance(m, ToolMessage) else m for m in all_messages]
-    _session_messages = trimmed[-config.MAX_HISTORY:]
-    _save_history()
-
-
-_load_history()
+    _history[session_id] = trimmed[-config.MAX_HISTORY:]
+    try:
+        store.save_history_raw(messages_to_dict(_history[session_id]), session_id)
+    except Exception as e:
+        logger.warning("Could not save session history for %s: %s", session_id, e)
 
 # ── System prompt ────────────────────────────────────────────────────────────────
 
@@ -146,6 +137,7 @@ def _check_state_guard() -> str | None:
 
 async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGenerator[dict[str, Any], None]:
     ensure_project()
+    state_context.set_session(session_id)  # bind tools (threadpool) to this session
     state_context.reset_session()
 
     ctx = runtime.new_run(task, session_id)
@@ -163,7 +155,7 @@ async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGener
     state = RouterState(mode=sess.routing_mode or get_routing_mode(),
                         start_model_id=sess.consume_manual_model() or consume_manual_model())
 
-    hist = list(_session_messages)
+    hist = list(_get_history(session_id))
     if hist:
         yield {"type": "context", "content": f"📎 Contexto activo: {len(hist)} mensajes de sesión anterior"}
     input_messages = hist + [HumanMessage(content=task)]
@@ -240,7 +232,7 @@ async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGener
                 return
 
             if captured_messages is not None:
-                _update_session_history(captured_messages)
+                _update_session_history(session_id, captured_messages)
 
             guard = _check_state_guard()
             if guard:

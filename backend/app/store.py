@@ -8,6 +8,7 @@ lock + per-call connections (SQLite handles concurrent readers fine).
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -139,15 +140,17 @@ def get_run_events(run_id: str, limit: int = 2000) -> list[dict]:
 
 # ── Per-project session history (replaces session_history.json) ─────────────────
 
-def _history_path() -> Path:
-    p = Path(config.project_root()) / ".swarm"
+def _history_path(session_id: str = "default") -> Path:
+    # Per-session file so concurrent sessions don't share one history blob.
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", session_id or "default")[:64] or "default"
+    p = Path(config.project_root()) / ".swarm" / "history"
     p.mkdir(parents=True, exist_ok=True)
-    return p / "session_history.json"
+    return p / f"{safe}.json"
 
 
-def load_history_raw() -> list:
+def load_history_raw(session_id: str = "default") -> list:
     try:
-        path = _history_path()
+        path = _history_path(session_id)
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -155,15 +158,15 @@ def load_history_raw() -> list:
     return []
 
 
-def save_history_raw(data: list) -> None:
+def save_history_raw(data: list, session_id: str = "default") -> None:
     try:
-        _history_path().write_text(json.dumps(data), encoding="utf-8")
+        _history_path(session_id).write_text(json.dumps(data), encoding="utf-8")
     except Exception:
         pass
 
 
-def clear_history() -> None:
+def clear_history(session_id: str = "default") -> None:
     try:
-        _history_path().unlink(missing_ok=True)
+        _history_path(session_id).unlink(missing_ok=True)
     except Exception:
         pass

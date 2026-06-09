@@ -199,9 +199,10 @@ export async function fetchRecentProjects(): Promise<string[]> {
 
 // ── Chat history ──────────────────────────────────────────────────────────────
 
-export async function fetchChatContext(): Promise<{ messages: number }> {
+export async function fetchChatContext(sessionId?: string): Promise<{ messages: number }> {
   try {
-    const res = await fetch(`${API}/api/chat/context`, { headers: headers(), signal: AbortSignal.timeout(3000) })
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+    const res = await fetch(`${API}/api/chat/context${q}`, { headers: headers(), signal: AbortSignal.timeout(3000) })
     if (!res.ok) return { messages: 0 }
     return res.json()
   } catch {
@@ -209,8 +210,10 @@ export async function fetchChatContext(): Promise<{ messages: number }> {
   }
 }
 
-export async function clearChatContext(): Promise<void> {
-  await fetch(`${API}/api/chat/clear`, { method: 'POST', headers: headers() })
+export async function clearChatContext(sessionId?: string): Promise<void> {
+  const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+  const res = await fetch(`${API}/api/chat/clear${q}`, { method: 'POST', headers: headers() })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
 }
 
 // ── Plan (agentic task tracking) ───────────────────────────────────────────────

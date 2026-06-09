@@ -402,13 +402,13 @@ async def select_model(req: ModelSelectRequest):
 # ── Chat history ──────────────────────────────────────────────────────────────
 
 @app.get("/api/chat/context", dependencies=[Depends(require_auth)])
-def get_chat_context():
-    return {"messages": session_message_count()}
+def get_chat_context(session_id: str | None = Query(default=None)):
+    return {"messages": session_message_count(session_id or "default")}
 
 
 @app.post("/api/chat/clear", dependencies=[Depends(require_auth)])
-def clear_chat_context():
-    clear_session_messages()
+def clear_chat_context(session_id: str | None = Query(default=None)):
+    clear_session_messages(session_id or "default")
     return {"status": "ok", "messages": 0}
 
 

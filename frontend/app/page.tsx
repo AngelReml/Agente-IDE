@@ -198,7 +198,7 @@ export default function SwarmIDE() {
   }, [])
 
   useEffect(() => {
-    fetchChatContext().then((r) => setContextMsgCount(r.messages))
+    fetchChatContext(sessionIdRef.current).then((r) => setContextMsgCount(r.messages))
   }, [agentRefresh])
 
   useEffect(() => {
@@ -319,7 +319,7 @@ export default function SwarmIDE() {
             if (event.provider) setActiveProvider(event.provider as Provider)
           }
           if (event.type === 'context') {
-            fetchChatContext().then((r) => setContextMsgCount(r.messages))
+            fetchChatContext(sessionIdRef.current).then((r) => setContextMsgCount(r.messages))
           }
           if (event.type === 'cost' && event.cost_usd !== undefined) {
             setRunCost(event.cost_usd)
@@ -329,7 +329,7 @@ export default function SwarmIDE() {
             setAgentRefresh((n) => n + 1)
             // B3: read the real cumulative session cost from the backend.
             fetchCost(sessionIdRef.current).then((c) => setSessionCost(c.session.cost_usd)).catch(() => {})
-            fetchChatContext().then((r) => setContextMsgCount(r.messages))
+            fetchChatContext(sessionIdRef.current).then((r) => setContextMsgCount(r.messages))
             const cur = activeFileRef.current
             if (cur) {
               fetchFileContent(cur)
@@ -388,7 +388,12 @@ export default function SwarmIDE() {
   }, [])
 
   const handleClearContext = useCallback(async () => {
-    await clearChatContext()
+    try {
+      await clearChatContext(sessionIdRef.current)
+    } catch {
+      setFileError('No se pudo borrar la memoria de la sesión')
+      return
+    }
     setContextMsgCount(0)
     setEvents((prev) => [
       ...prev,
