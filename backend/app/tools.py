@@ -157,8 +157,13 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     if not os.path.exists(full_path):
         return f"❌ Archivo no encontrado: {path}"
     try:
-        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+        # Strict UTF-8: a read-modify-write with errors="replace" would silently
+        # turn undecodable bytes into U+FFFD and PERSIST that, corrupting the file.
+        with open(full_path, "r", encoding="utf-8") as f:
             content = f.read()
+    except UnicodeDecodeError:
+        return (f"❌ {path} no es UTF-8 válido; editarlo lo corrompería. "
+                f"Edítalo manualmente o reescríbelo con write_file si es intencional.")
     except Exception as e:
         return f"❌ No se pudo leer: {e}"
 
@@ -223,8 +228,11 @@ def apply_patch(patch: str) -> str:
             return f"❌ apply_patch[{i}]: archivo no encontrado: {path}"
         base = staged.get(full)
         if base is None:
-            with open(full, "r", encoding="utf-8", errors="replace") as fh:
-                base = fh.read()
+            try:
+                with open(full, "r", encoding="utf-8") as fh:
+                    base = fh.read()
+            except UnicodeDecodeError:
+                return f"❌ apply_patch[{i}]: {path} no es UTF-8 válido; no se edita para no corromperlo."
         cnt = base.count(old)
         if cnt == 0:
             return f"❌ apply_patch[{i}]: cadena no encontrada en {path}."
@@ -450,13 +458,23 @@ def fetch_url(url: str, as_json: bool = False) -> str:
     blocked = security.validate_outbound_url(url)
     if blocked:
         return f"❌ {blocked}"
+
+    class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+        # Re-validate every redirect target — otherwise a public URL could 3xx to
+        # 169.254.169.254 / a private IP that the initial check never saw (SSRF).
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            if security.validate_outbound_url(newurl):
+                raise urllib.error.HTTPError(newurl, code, "Redirección bloqueada (SSRF)", headers, fp)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
     try:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 SwarmIDE/4.0",
             "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
             "Accept-Language": "es,en;q=0.9",
         })
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        opener = urllib.request.build_opener(_GuardedRedirect)
+        with opener.open(req, timeout=20) as resp:
             raw = resp.read()
             charset = resp.info().get_content_charset("utf-8")
             text = raw.decode(charset, errors="replace")

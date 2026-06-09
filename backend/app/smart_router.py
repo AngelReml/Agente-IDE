@@ -71,6 +71,9 @@ class ModelEntry:
             "openrouter":  "https://openrouter.ai/api/v1",
         }
         kwargs = dict(model=self.model_id, api_key=os.getenv(self.key_env), **common)
+        if "reasoner" in self.model_id.lower() or self.model_id.lower().startswith(("o1", "o3")):
+            # Reasoning models reject a custom temperature (some return HTTP 400).
+            kwargs.pop("temperature", None)
         if self.provider == "groq":
             kwargs["max_tokens"] = 8192
         if self.provider in base_urls:

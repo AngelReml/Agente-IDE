@@ -6,6 +6,7 @@ so runs survive restarts and can be listed/inspected. Thread-safe via a module
 lock + per-call connections (SQLite handles concurrent readers fine).
 """
 import json
+import logging
 import os
 import sqlite3
 import threading
@@ -15,6 +16,7 @@ from typing import Any
 
 from . import config
 
+logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 
 
@@ -80,7 +82,7 @@ def record_event(run_id: str, etype: str, content: str = "", tool: str | None = 
                 (run_id, time.time(), etype, tool, (content or "")[:4000]),
             )
     except Exception:
-        pass
+        logger.debug("record_event failed for run %s", run_id, exc_info=True)
 
 
 def finish_run(run_id: str, status: str, provider: str | None,
@@ -95,7 +97,7 @@ def finish_run(run_id: str, status: str, provider: str | None,
                  cost.get("cost_usd", 0.0), time.time(), run_id),
             )
     except Exception:
-        pass
+        logger.debug("finish_run failed for run %s", run_id, exc_info=True)
 
 
 def list_runs(session_id: str | None = None, limit: int = 50) -> list[dict]:

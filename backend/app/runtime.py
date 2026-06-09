@@ -91,14 +91,23 @@ class SessionManager:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
 
+    def _prune(self, now: float) -> None:
+        ttl = getattr(config, "SESSION_TTL_SECONDS", 6 * 3600)
+        stale = [sid for sid, s in self._sessions.items()
+                 if sid != "default" and now - s.last_active > ttl]
+        for sid in stale:
+            self._sessions.pop(sid, None)
+
     def get(self, session_id: str | None) -> Session:
         sid = session_id or "default"
         with self._lock:
+            now = time.time()
+            self._prune(now)  # bound memory: drop idle sessions
             sess = self._sessions.get(sid)
             if sess is None:
                 sess = Session(id=sid)
                 self._sessions[sid] = sess
-            sess.last_active = time.time()
+            sess.last_active = now
             return sess
 
     def all(self) -> list[Session]:
