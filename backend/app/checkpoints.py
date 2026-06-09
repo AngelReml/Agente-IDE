@@ -63,7 +63,9 @@ def list_checkpoints() -> list[dict]:
     return out
 
 
-def restore_checkpoint(ckpt_id: int) -> dict:
+def restore_checkpoint(ckpt_id: int, prune: bool = False) -> dict:
+    """Restore the snapshot. With prune=True it also DELETES files created after the
+    checkpoint (a true rollback), used by the swarm review gate to undo rejected work."""
     root = config.project_root()
     src = os.path.join(_dir(), str(ckpt_id))
     mf = os.path.join(src, "manifest.json")
@@ -85,4 +87,20 @@ def restore_checkpoint(ckpt_id: int) -> dict:
             os.makedirs(os.path.dirname(d) or ".", exist_ok=True)
             shutil.copy2(s, d)
             restored.append(rel)
-    return {"id": ckpt_id, "restored": len(restored), "files": restored}
+
+    pruned = 0
+    if prune:
+        snapshot = set(manifest["files"])
+        for dp, dirs, fnames in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in config.SKIP_DIRS]
+            for fname in fnames:
+                full = os.path.join(dp, fname)
+                rel = os.path.relpath(full, root)
+                if rel in snapshot or config.is_secret_path(full):
+                    continue
+                try:
+                    os.remove(full)  # created after the checkpoint → remove to complete rollback
+                    pruned += 1
+                except OSError:
+                    continue
+    return {"id": ckpt_id, "restored": len(restored), "pruned": pruned, "files": restored}

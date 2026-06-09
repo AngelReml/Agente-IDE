@@ -96,3 +96,19 @@ def test_checkpoint_excludes_secrets(tmp_path, monkeypatch):
     cp = checkpoints.create_checkpoint("c")
     assert "app.py" in cp["files"]
     assert ".env" not in cp["files"]  # secret excluded from the snapshot
+
+
+# ── Review gate rollback: restore with prune undoes the whole change-set ─────────
+
+def test_checkpoint_restore_prune_rolls_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("PROJECT_ROOT", str(tmp_path))
+    (tmp_path / "keep.py").write_text("v1")
+    from app import checkpoints
+    cp = checkpoints.create_checkpoint("base")
+    # Simulate a rejected swarm change: modify an existing file + create a new one.
+    (tmp_path / "keep.py").write_text("v2-rejected")
+    (tmp_path / "new_bad.py").write_text("garbage")
+    res = checkpoints.restore_checkpoint(cp["id"], prune=True)
+    assert (tmp_path / "keep.py").read_text() == "v1"       # modification reverted
+    assert not (tmp_path / "new_bad.py").exists()           # created file pruned
+    assert res["pruned"] >= 1

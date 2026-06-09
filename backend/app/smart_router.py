@@ -76,7 +76,12 @@ class ModelEntry:
             kwargs.pop("temperature", None)
         if self.provider == "groq":
             kwargs["max_tokens"] = 8192
-        if self.provider in base_urls:
+        # Allow overriding any provider's endpoint via env, e.g. SWARM_GLM_BASE_URL
+        # to point GLM at the international host (https://api.z.ai/api/paas/v4/).
+        env_base = os.getenv(f"SWARM_{self.provider.upper()}_BASE_URL")
+        if env_base:
+            kwargs["base_url"] = env_base
+        elif self.provider in base_urls:
             kwargs["base_url"] = base_urls[self.provider]
         if self.provider == "openrouter":
             kwargs["default_headers"] = {

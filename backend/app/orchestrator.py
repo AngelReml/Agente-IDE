@@ -247,6 +247,18 @@ async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGener
         yield {"type": "done", "content": ""}
         return
 
+    # If the plan has a reviewer, snapshot the workspace BEFORE any change so the
+    # review gate can roll the whole change-set back if it ultimately rejects it
+    # (before, a rejected change stayed on disk — the gate had no teeth).
+    baseline_id = None
+    if any(s.role == "reviewer" for s in subtasks):
+        try:
+            from . import checkpoints
+            baseline_id = checkpoints.create_checkpoint(f"pre-swarm: {task[:60]}")["id"]
+        except Exception:
+            baseline_id = None
+    blocked = False
+
     sem = asyncio.Semaphore(config.MAX_SWARM_CONCURRENCY)
     blackboard: dict[str, str] = {}
     for bi, batch in enumerate(batches):
@@ -316,6 +328,20 @@ async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGener
                     yield {"type": "info", "content": f"✅ {s.id} APROBÓ tras reintento"}
                     break
             if not approved:
+                blocked = True
                 yield {"type": "info", "content": f"⛔ {s.id} sigue rechazando tras {MAX_GATE_RETRIES} reintento(s)"}
+
+    if blocked and baseline_id is not None:
+        # The review gate now has teeth: undo the rejected change-set entirely.
+        try:
+            from . import checkpoints
+            res = checkpoints.restore_checkpoint(baseline_id, prune=True)
+            yield {"type": "info",
+                   "content": (f"↩️ Revisión bloqueó el cambio: workspace revertido al estado previo "
+                               f"({res['restored']} restaurados, {res['pruned']} creados eliminados).")}
+        except Exception as e:
+            yield {"type": "info", "content": f"⚠️ No se pudo revertir automáticamente: {str(e)[:120]}"}
+        yield {"type": "done", "content": "⛔ Enjambre bloqueado por revisión — cambios deshechos"}
+        return
 
     yield {"type": "done", "content": "✅ Enjambre completado"}
