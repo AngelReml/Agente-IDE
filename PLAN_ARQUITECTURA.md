@@ -195,19 +195,23 @@ multi-tenant real el ejecutor del agente necesita aislamiento fuerte.
 | 3 | B1 — interfaz Retriever + chunking AST | 🟢 | ✅ | flag tfidf↔embeddings, default igual |
 | 4 | B2 — embeddings + caché + store local | 🟡 | ✅ | recall@k mejor en evals, offline intacto |
 | 5 | C1 — socket-proxy + DOCKER_HOST | 🟡 | ✅ | API sin socket crudo; proxy con allowlist |
-| 6 | C2 — runtime aislado (gVisor) + cuotas | 🔴 | ◑ | runtime por flag + cuotas/workspace (falta worker out-of-process) |
+| 6 | C2 — runtime aislado (gVisor) + cuotas + worker | 🔴 | ✅ | comando confinado; ejecución out-of-process en el worker |
 | 7 | B3 — pgvector (plataforma) | 🟡 | ✅ | retrieval escalado sobre el Postgres existente |
 
 Cada fase: rama propia, tests nuevos, feature-flag, y el modo local de un clic
 **nunca se rompe**. Total estimado: ~3-5 semanas de trabajo enfocado.
 
 ### Estado a 9 jun 2026
-Fases 1–5 y 7 **completas**; Fase 6 **parcial** (◑): `--runtime` endurecido por
-`SWARM_SANDBOX_RUNTIME` y cuotas de recursos por workspace **ya aplicadas en el
-ejecutor** (`tools` → `tenancy.limits_for_root` → `backend.run(limits=…)`); queda
-solo el paso 4 (mover la ejecución del sandbox a un worker out-of-process para que
-la API solo encole). Suite: 101 tests en verde; CI endurecido (deps reales + ruff
-fijado).
+**Las 7 fases del plan están completas.** Fase 6 cerrada: `--runtime` endurecido
+(`SWARM_SANDBOX_RUNTIME`, validado en preflight), cuotas por workspace aplicadas en
+el ejecutor (`tools` → `tenancy.limits_for_root` → `backend.run(limits=…)`), y
+**ejecución out-of-process** (paso 4): con `REDIS_URL`+arq la API solo encola y el
+worker —único con acceso a Docker vía socket-proxy— ejecuta el run y publica eventos
+en el bus (`app/runbus.py`, Redis Streams) que la API retransmite por SSE.
+
+Suite: 111 tests en verde; CI endurecido (deps reales + ruff fijado). El path Redis
+(worker, RedisBus, encolado) está unit-testeado con fakes; **pendiente de prueba de
+integración** con Redis + worker reales antes de exponer el despliegue multi-tenant.
 
 Flags introducidos: `SWARM_SANDBOX_RUNTIME`, `DOCKER_HOST`, `SWARM_SANDBOX_CPUS`,
 `SWARM_SANDBOX_PIDS`, `SWARM_VECTOR_STORE` (memory|pgvector), `SWARM_EMBED_DIM`.
