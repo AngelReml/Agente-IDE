@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import sys
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -137,6 +138,13 @@ def _has_keys() -> bool:
 
 
 def main() -> int:
+    # The harness prints emojis/accents; on a non-UTF-8 console (Windows cp1252)
+    # that raises UnicodeEncodeError. Force UTF-8 so it runs anywhere (CI is UTF-8,
+    # but devs on Windows shouldn't hit a crash just to print "no keys").
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):  # pragma: no cover - exotic stream
+        pass
     if not _has_keys():
         print("⏭  Sin claves API — evals omitidos (la estructura del arnés sí se valida en pytest).")
         return 0
