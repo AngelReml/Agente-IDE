@@ -345,3 +345,38 @@ def _extract_final(data: dict) -> str:
 
 def _short(exc: Exception) -> str:
     return str(exc)[:200]
+
+
+# ── Shared cost accounting (used by the swarm orchestrator too) ─────────────────
+# Before this, only run_swarm_stream recorded token usage, so swarm subagents and
+# the planner were billed at $0. These helpers let any caller record usage.
+
+def _record_usage(usage, model_info: dict) -> dict | None:
+    if not usage:
+        return None
+    try:
+        inp = int(usage.get("input_tokens", 0) or 0)
+        out = int(usage.get("output_tokens", 0) or 0)
+        if inp == 0 and out == 0:
+            return None
+        cost = cost_tracker.record(model_info.get("provider", ""), model_info.get("model", ""), inp, out)
+        s = cost_tracker.session_stats()
+        return {"type": "cost", "input_tokens": s["input_tokens"],
+                "output_tokens": s["output_tokens"], "cost_usd": s["cost_usd"],
+                "content": f"🪙 +${cost:.4f} → ${s['cost_usd']:.4f} acumulado"}
+    except Exception:
+        return None
+
+
+def record_cost_from_event(event: dict, model_info: dict) -> dict | None:
+    """Record token usage from a LangChain `on_chat_model_end` event. Returns a
+    'cost' event dict (or None). Safe to call on every streamed event."""
+    if event.get("event") != "on_chat_model_end":
+        return None
+    output = event.get("data", {}).get("output")
+    return _record_usage(getattr(output, "usage_metadata", None), model_info)
+
+
+def record_cost_from_message(message, model_info: dict) -> dict | None:
+    """Record token usage from a single invoke() result message."""
+    return _record_usage(getattr(message, "usage_metadata", None), model_info)

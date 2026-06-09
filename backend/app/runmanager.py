@@ -6,14 +6,24 @@ Here a run executes in a background task and buffers its events, so:
   • the client can disconnect and reconnect without losing the run, and
   • a late subscriber gets the full backlog then the live tail.
 
+Hardening (post-audit):
+  • the per-run event buffer is bounded (deque maxlen) and finished runs are
+    evicted with an LRU cap, so the process no longer grows without bound, and
+  • runs are persisted to the store (start/events/finish), so they survive a
+    restart and `/api/runs` reflects in-process runs (it used to be empty).
+
 This is the local foundation; the production path swaps the in-process registry
 for a Redis-backed queue + worker pool (same interface). The agent driver is
 injectable so the manager is unit-testable without the LLM stack.
 """
 import asyncio
 import logging
+import time
 import uuid
-from typing import AsyncGenerator, Awaitable, Callable, Optional
+from collections import OrderedDict, deque
+from typing import AsyncGenerator, Callable, Optional
+
+from . import config
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +32,25 @@ _END = {"type": "_end"}
 # An agent is an async generator: agent(task, session_id) -> events
 AgentFactory = Callable[[str, str], "AsyncGenerator[dict, None]"]
 
+# Streaming chunk types we do NOT persist per-event (too high-volume / low-value).
+_VOLATILE_EVENT_TYPES = frozenset({"token", "_end"})
+
 
 class _Run:
-    def __init__(self, run_id: str):
+    def __init__(self, run_id: str, session_id: str = "default", task: str = ""):
         self.run_id = run_id
-        self.events: list[dict] = []
+        self.session_id = session_id
+        self.task = task
+        # Bounded buffer: a reconnecting client replays the recent tail, not an
+        # unbounded history that would eventually OOM the process.
+        self.events: deque[dict] = deque(maxlen=config.RUN_EVENT_BUFFER)
         self.subscribers: list[asyncio.Queue] = []
         self.done = False
-        self.task: Optional[asyncio.Task] = None
+        self.status = "running"
+        self.provider: Optional[str] = None
+        self.model: Optional[str] = None
+        self.started_at = time.time()
+        self.task_handle: Optional[asyncio.Task] = None
 
     def publish(self, ev: dict) -> None:
         self.events.append(ev)
@@ -38,9 +59,37 @@ class _Run:
 
 
 class RunManager:
-    def __init__(self, agent_factory: AgentFactory | None = None):
+    def __init__(self, agent_factory: AgentFactory | None = None, persist: bool = True):
         self._agent = agent_factory
-        self._runs: dict[str, _Run] = {}
+        self._runs: "OrderedDict[str, _Run]" = OrderedDict()
+        self._persist = persist
+
+    def _evict(self) -> None:
+        """Keep memory bounded: drop the oldest FINISHED runs beyond the cap.
+        Active runs are never evicted."""
+        while len(self._runs) > config.MAX_RETAINED_RUNS:
+            for rid, r in self._runs.items():
+                if r.done:
+                    self._runs.pop(rid, None)
+                    break
+            else:
+                break  # nothing finished to evict yet
+
+    def _store(self, phase: str, run: "_Run", ev: dict | None = None) -> None:
+        """Best-effort persistence. Never raises into the run."""
+        if not self._persist:
+            return
+        try:
+            from . import store, cost_tracker
+            if phase == "start":
+                store.start_run(run.run_id, run.session_id, run.task)
+            elif phase == "event" and ev is not None and ev.get("type") not in _VOLATILE_EVENT_TYPES:
+                store.record_event(run.run_id, ev.get("type", ""), ev.get("content", ""), ev.get("tool"))
+            elif phase == "finish":
+                store.finish_run(run.run_id, run.status, run.provider, run.model,
+                                 cost_tracker.run_stats())
+        except Exception:  # pragma: no cover - persistence must never break a run
+            logger.debug("run persistence (%s) failed for %s", phase, run.run_id, exc_info=True)
 
     async def start(self, task: str, session_id: str = "default",
                     agent: AgentFactory | None = None) -> str:
@@ -48,41 +97,64 @@ class RunManager:
         if agent_fn is None:
             raise RuntimeError("RunManager sin agente configurado")
         run_id = uuid.uuid4().hex[:12]
-        run = _Run(run_id)
+        run = _Run(run_id, session_id, task)
         self._runs[run_id] = run
+        self._evict()
+        self._store("start", run)
 
         async def driver() -> None:
             try:
                 async for ev in agent_fn(task, session_id):
                     run.publish(ev)
+                    if isinstance(ev, dict):
+                        if ev.get("provider"):
+                            run.provider = ev.get("provider")
+                        if ev.get("model"):
+                            run.model = ev.get("model")
+                    self._store("event", run, ev)
+                run.status = "done"
             except asyncio.CancelledError:
+                run.status = "cancelled"
                 run.publish({"type": "info", "content": "⏹ Run cancelado"})
             except Exception as e:  # pragma: no cover - defensive
+                run.status = "error"
                 logger.exception("run %s failed", run_id)
                 run.publish({"type": "error", "content": str(e)[:300]})
             finally:
                 run.done = True
                 run.publish(_END)
+                self._store("finish", run)
 
-        run.task = asyncio.create_task(driver())
+        run.task_handle = asyncio.create_task(driver())
         return run_id
 
     async def subscribe(self, run_id: str) -> AsyncGenerator[dict, None]:
         run = self._runs.get(run_id)
         if run is None:
             return
-        # Replay the backlog so a reconnecting client catches up.
-        for ev in list(run.events):
-            if ev is _END:
-                return
-            yield ev
-        if run.done:
-            return
+        # Register the live queue BEFORE snapshotting the backlog, so an event
+        # published in between is captured by the queue rather than lost. We then
+        # de-duplicate by skipping queued events already present in the backlog.
         q: asyncio.Queue = asyncio.Queue()
-        run.subscribers.append(q)
+        if not run.done:
+            run.subscribers.append(q)
+        # Snapshot the backlog AFTER registering the queue (no await in between, so
+        # it's atomic vs. the driver). Any event that lands in both the backlog and
+        # the queue is de-duplicated by object identity, so the subscriber sees each
+        # event exactly once with no lost-event race.
+        backlog = list(run.events)
+        backlog_ids = {id(ev) for ev in backlog}
         try:
+            for ev in backlog:
+                if ev is _END:
+                    return
+                yield ev
+            if run.done:
+                return
             while True:
                 ev = await q.get()
+                if id(ev) in backlog_ids:
+                    continue  # already replayed from the backlog snapshot
                 if ev is _END:
                     return
                 yield ev
@@ -92,8 +164,8 @@ class RunManager:
 
     def cancel(self, run_id: str) -> bool:
         run = self._runs.get(run_id)
-        if run and run.task and not run.task.done():
-            run.task.cancel()
+        if run and run.task_handle and not run.task_handle.done():
+            run.task_handle.cancel()
             return True
         return False
 

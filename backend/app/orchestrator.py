@@ -18,6 +18,8 @@ import re
 from dataclasses import dataclass, field
 from typing import AsyncGenerator
 
+from . import config
+
 ROLES = ("architect", "coder", "reviewer", "tester")
 
 # Tool subset per role (names resolved against tools.ALL_TOOLS at run time).
@@ -74,7 +76,8 @@ def parse_plan(raw: str) -> list[SubTask]:
         goal = str(item.get("goal") or item.get("task") or "").strip()
         if goal:
             out.append(SubTask(id=sid, goal=goal, role=role, depends_on=deps))
-    return out
+    # Cap to avoid a malformed/poisoned plan spawning hundreds of agents.
+    return out[:config.MAX_SUBTASKS]
 
 
 def schedule(subtasks: list[SubTask]) -> list[list[SubTask]]:
@@ -143,13 +146,24 @@ async def plan(task: str) -> list[SubTask]:
     """Ask a model for a DAG; fall back to a single coder subtask on any failure."""
     try:
         import asyncio
-        from .smart_router import get_heavy_model
+        from .smart_router import RouterState, get_heavy_model
         from langchain_core.messages import HumanMessage
+        from . import graph
 
         def _call():
-            return get_heavy_model().invoke([HumanMessage(content=_PLANNER_PROMPT.format(task=task))]).content
+            state = RouterState(mode="power")
+            entry = state.current()
+            model = entry.build() if entry else get_heavy_model()
+            info = entry.info() if entry else {"provider": "", "model": ""}
+            msg = model.invoke([HumanMessage(content=_PLANNER_PROMPT.format(task=task))])
+            return msg, info
 
-        raw = await asyncio.to_thread(_call)
+        msg, info = await asyncio.to_thread(_call)
+        try:
+            graph.record_cost_from_message(msg, info)  # planner cost was billed at $0 before
+        except Exception:
+            pass
+        raw = msg.content if hasattr(msg, "content") else str(msg)
         subtasks = parse_plan(raw if isinstance(raw, str) else str(raw))
         if subtasks:
             return subtasks
@@ -186,17 +200,37 @@ async def _run_subtask(st: SubTask, root_task: str, context: dict[str, str],
             pass
     prompt = f"{ROLE_PROMPT.get(st.role, '')}\n\nOBJETIVO GLOBAL: {root_task}\n\nTU SUBTAREA: {st.goal}{ctx_block}"
 
+    from .smart_router import is_retriable
     state = RouterState(mode=get_routing_mode())
-    entry = state.current()
-    if entry is None:
-        yield {"type": "error", "content": "Sin modelos disponibles"}
-        return
-    agent = create_react_agent(model=entry.build(), tools=_tools_for(st.role), prompt=prompt)
-    async for event in agent.astream_events({"messages": [HumanMessage(content=st.goal)]},
-                                            version="v2", config={"recursion_limit": config.RECURSION_LIMIT}):
-        parsed = graph._parse_event(event, entry.info())
-        if parsed:
-            yield parsed
+    # Per-subtask model fallback: a 429/quota error advances to the next model
+    # instead of killing the subtask (the single-agent path already did this; the
+    # swarm used to lack it, so one provider hiccup tumbled a whole subtask).
+    while True:
+        entry = state.current()
+        if entry is None:
+            yield {"type": "error", "content": f"{st.id}: sin modelos disponibles"}
+            return
+        info = entry.info()
+        try:
+            agent = create_react_agent(model=entry.build(), tools=_tools_for(st.role), prompt=prompt)
+            async for event in agent.astream_events(
+                    {"messages": [HumanMessage(content=st.goal)]},
+                    version="v2", config={"recursion_limit": config.RECURSION_LIMIT}):
+                cost_ev = graph.record_cost_from_event(event, info)
+                if cost_ev:
+                    yield cost_ev
+                parsed = graph._parse_event(event, info)
+                if parsed:
+                    yield parsed
+            return  # subtask completed
+        except Exception as exc:
+            nxt = state.advance()
+            if nxt is None:
+                yield {"type": "error", "content": f"{st.id}: {str(exc)[:160]} — sin más modelos"}
+                return
+            verb = "sin créditos" if is_retriable(exc) else "error"
+            yield {"type": "info",
+                   "content": f"⚡ {st.id}: {info['display']} {verb} → {nxt.display_name}"}
 
 
 async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGenerator[dict, None]:
@@ -213,6 +247,7 @@ async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGener
         yield {"type": "done", "content": ""}
         return
 
+    sem = asyncio.Semaphore(config.MAX_SWARM_CONCURRENCY)
     blackboard: dict[str, str] = {}
     for bi, batch in enumerate(batches):
         yield {"type": "info", "content": f"▶ Batch {bi+1}/{len(batches)}: {', '.join(s.id for s in batch)} (paralelo)"}
@@ -221,24 +256,35 @@ async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGener
         async def worker(st: SubTask):
             ctx = {d: blackboard.get(d, "") for d in st.depends_on}
             try:
-                async for ev in _run_subtask(st, task, ctx, session_id):
-                    await queue.put((st.id, ev))
+                async with sem:  # cap concurrent subagents within the batch
+                    async for ev in _run_subtask(st, task, ctx, session_id):
+                        await queue.put((st.id, ev))
+            except asyncio.CancelledError:
+                raise
             except Exception as e:  # pragma: no cover
                 await queue.put((st.id, {"type": "error", "content": f"{st.id}: {str(e)[:200]}"}))
-            await queue.put((st.id, None))
+            finally:
+                await queue.put((st.id, None))
 
         workers = [asyncio.create_task(worker(s)) for s in batch]
         remaining = len(batch)
         outputs: dict[str, str] = {}
-        while remaining:
-            sid, ev = await queue.get()
-            if ev is None:
-                remaining -= 1
-                continue
-            if ev.get("type") == "final":
-                outputs[sid] = ev.get("content", "")
-            yield {**ev, "subtask": sid}
-        await asyncio.gather(*workers, return_exceptions=True)
+        try:
+            while remaining:
+                sid, ev = await queue.get()
+                if ev is None:
+                    remaining -= 1
+                    continue
+                if ev.get("type") == "final":
+                    outputs[sid] = ev.get("content", "")
+                yield {**ev, "subtask": sid}
+        finally:
+            # If the consumer is cancelled (client disconnected), don't leave the
+            # subagents running — they'd keep burning tokens and touching disk.
+            for w in workers:
+                if not w.done():
+                    w.cancel()
+            await asyncio.gather(*workers, return_exceptions=True)
         blackboard.update(outputs)
 
         # Review gate (Fase 4): on rejection, re-run the reviewed coders with the

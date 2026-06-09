@@ -116,6 +116,10 @@ RUN_EVENT_BUFFER = 5_000   # max events kept in memory per run for replay
 MAX_RETAINED_RUNS = 200    # max finished runs kept in memory (LRU eviction)
 SESSION_TTL_SECONDS = 6 * 3600  # idle sessions pruned after this
 
+# Swarm orchestrator bounds (prevent a runaway plan from spawning hundreds of agents).
+MAX_SUBTASKS = 12              # hard cap on subtasks parsed from a plan
+MAX_SWARM_CONCURRENCY = 4      # max subagents running at once within a batch
+
 
 # ── SSRF guard ──────────────────────────────────────────────────────────────────
 # fetch_url refuses these unless SWARM_ALLOW_PRIVATE_FETCH=1.
