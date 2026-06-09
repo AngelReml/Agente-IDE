@@ -1,30 +1,42 @@
-import os
+import asyncio
 import json
 import logging
-import asyncio
+import os
 import subprocess
 from pathlib import Path
 
 # Load .env before any local imports so os.getenv() sees the values.
 from dotenv import load_dotenv
+
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, Depends, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel, Field
+from sse_starlette.sse import EventSourceResponse
 
-from .graph import run_swarm_stream, clear_session_messages, session_message_count
-from .smart_router import current_info, all_info, reset, set_model, set_routing_mode, get_routing_mode
-from .tools import ensure_project
-from . import (safe_fs, diff_parser, ast_indexer, cost_tracker, store, config, security, auth,
-               orchestrator, metrics, checkpoints)
-from .config import project_root, SKIP_DIRS, MAX_FILE_BYTES
-from .security import require_auth
-from .runmanager import RunManager
+from . import (
+    ast_indexer,
+    auth,
+    checkpoints,
+    config,
+    cost_tracker,
+    diff_parser,
+    metrics,
+    orchestrator,
+    safe_fs,
+    security,
+    store,
+)
+from .config import MAX_FILE_BYTES, SKIP_DIRS, project_root
+from .graph import clear_session_messages, run_swarm_stream, session_message_count
 from .platform import sandbox
+from .runmanager import RunManager
+from .security import require_auth
+from .smart_router import all_info, current_info, get_routing_mode, reset, set_model, set_routing_mode
 from .terminal import handle_terminal_ws
+from .tools import ensure_project
 
 # Durable run registry (in-process foundation; swap for Redis+workers to scale).
 _runs = RunManager(run_swarm_stream)
@@ -236,7 +248,7 @@ def get_file(path: str = Query(..., max_length=500)):
     if os.path.getsize(full) > MAX_FILE_BYTES:
         raise HTTPException(413, f"File too large (>{MAX_FILE_BYTES//1024}KB)")
     try:
-        with open(full, "r", encoding="utf-8", errors="replace") as f:
+        with open(full, encoding="utf-8", errors="replace") as f:
             return {"path": path, "content": f.read()}
     except Exception:
         logger.exception("get_file failed for %s", path)
@@ -480,7 +492,7 @@ def get_plan():
     p = os.path.join(project_root(), ".swarm", "plan.md")
     if not os.path.exists(p):
         return {"plan": ""}
-    with open(p, "r", encoding="utf-8") as f:
+    with open(p, encoding="utf-8") as f:
         return {"plan": f.read()}
 
 

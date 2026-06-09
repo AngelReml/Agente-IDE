@@ -6,9 +6,8 @@ and so the rest of the codebase stops hard-coding magic numbers and paths.
 """
 import os
 import re
-from pathlib import Path
 from functools import lru_cache
-
+from pathlib import Path
 
 # ── Project root (read at runtime, never cached at import-time) ─────────────────
 # Reading this lazily is what makes "hot project switch" actually work: every

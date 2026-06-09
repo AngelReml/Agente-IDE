@@ -21,7 +21,7 @@ import logging
 import time
 import uuid
 from collections import OrderedDict, deque
-from typing import AsyncGenerator, Callable, Optional
+from collections.abc import AsyncGenerator, Callable
 
 from . import config
 
@@ -47,10 +47,10 @@ class _Run:
         self.subscribers: list[asyncio.Queue] = []
         self.done = False
         self.status = "running"
-        self.provider: Optional[str] = None
-        self.model: Optional[str] = None
+        self.provider: str | None = None
+        self.model: str | None = None
         self.started_at = time.time()
-        self.task_handle: Optional[asyncio.Task] = None
+        self.task_handle: asyncio.Task | None = None
 
     def publish(self, ev: dict) -> None:
         self.events.append(ev)
@@ -61,7 +61,7 @@ class _Run:
 class RunManager:
     def __init__(self, agent_factory: AgentFactory | None = None, persist: bool = True):
         self._agent = agent_factory
-        self._runs: "OrderedDict[str, _Run]" = OrderedDict()
+        self._runs: OrderedDict[str, _Run] = OrderedDict()
         self._persist = persist
 
     def _evict(self) -> None:
@@ -80,7 +80,7 @@ class RunManager:
         if not self._persist:
             return
         try:
-            from . import store, cost_tracker
+            from . import cost_tracker, store
             if phase == "start":
                 store.start_run(run.run_id, run.session_id, run.task)
             elif phase == "event" and ev is not None and ev.get("type") not in _VOLATILE_EVENT_TYPES:

@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator
 
 from . import config
 
@@ -146,9 +146,11 @@ async def plan(task: str) -> list[SubTask]:
     """Ask a model for a DAG; fall back to a single coder subtask on any failure."""
     try:
         import asyncio
-        from .smart_router import RouterState, get_heavy_model
+
         from langchain_core.messages import HumanMessage
+
         from . import graph
+        from .smart_router import RouterState, get_heavy_model
 
         def _call():
             state = RouterState(mode="power")
@@ -182,8 +184,9 @@ async def _run_subtask(st: SubTask, root_task: str, context: dict[str, str],
                        session_id: str) -> AsyncGenerator[dict, None]:
     from langchain_core.messages import HumanMessage
     from langgraph.prebuilt import create_react_agent
+
+    from . import config, graph
     from .smart_router import RouterState, get_routing_mode
-    from . import graph, config
 
     ctx_block = ""
     if context:
@@ -193,6 +196,7 @@ async def _run_subtask(st: SubTask, root_task: str, context: dict[str, str],
     if st.role in ("coder", "architect"):
         try:
             import asyncio
+
             from . import retrieval
             # Off the event loop: building/scanning the repo is blocking I/O.
             rc = await asyncio.to_thread(retrieval.retrieve_context, st.goal, None, 4)
@@ -267,7 +271,7 @@ async def run_orchestrated(task: str, session_id: str = "default") -> AsyncGener
         yield {"type": "info", "content": f"▶ Batch {bi+1}/{len(batches)}: {', '.join(s.id for s in batch)} (paralelo)"}
         queue: asyncio.Queue = asyncio.Queue()
 
-        async def worker(st: SubTask):
+        async def worker(st: SubTask, queue: asyncio.Queue = queue):
             ctx = {d: blackboard.get(d, "") for d in st.depends_on}
             try:
                 async with sem:  # cap concurrent subagents within the batch

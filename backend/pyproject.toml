@@ -15,6 +15,9 @@ ignore = [
     "E501",  # line length handled by formatter
     "B008",  # FastAPI uses function calls (Depends/Query) in defaults
     "E402",  # main.py loads dotenv before local imports on purpose
+    "B904",  # API handlers re-raise HTTPException from caught validation errors on
+             # purpose; the exception chain is never sent to the client, so
+             # `raise ... from e` adds noise. (Common FastAPI convention.)
 ]
 
 [tool.pytest.ini_options]

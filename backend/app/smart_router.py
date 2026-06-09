@@ -7,11 +7,10 @@ fallback in fast mode). Each run owns a RouterState whose candidate list contain
 EVERY available model in priority order, so advance() can always reach all of
 them. The module keeps a thin default state for the stateless info endpoints.
 """
-import os
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
-from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +99,7 @@ class ModelEntry:
 
 
 # ── Priority chain ──────────────────────────────────────────────────────────────
-CHAIN: List[ModelEntry] = [
+CHAIN: list[ModelEntry] = [
     ModelEntry("anthropic", "claude-opus-4-5",   "Claude Opus 4.5",   "ANTHROPIC_API_KEY"),
     ModelEntry("anthropic", "claude-sonnet-4-5", "Claude Sonnet 4.5", "ANTHROPIC_API_KEY"),
     ModelEntry("anthropic", "claude-haiku-4-5",  "Claude Haiku 4.5",  "ANTHROPIC_API_KEY"),
@@ -131,11 +130,11 @@ POWER_PROVIDERS = ["anthropic", "openai", "gemini"]
 CHEAP_PROVIDERS = ["groq", "deepseek", "glm", "huggingface"]
 
 
-def available_indices() -> List[int]:
+def available_indices() -> list[int]:
     return [i for i, e in enumerate(CHAIN) if e.available()]
 
 
-def build_order(mode: str) -> List[int]:
+def build_order(mode: str) -> list[int]:
     """Full priority-ordered list of available model indices.
 
     Every available model appears exactly once, so a RouterState built from this
@@ -161,7 +160,7 @@ def build_order(mode: str) -> List[int]:
     or_paid = [i for i in avail if CHAIN[i].provider == "openrouter" and not CHAIN[i].is_free]
     or_free = [i for i in avail if CHAIN[i].provider == "openrouter" and CHAIN[i].is_free]
 
-    order: List[int] = []
+    order: list[int] = []
     for i in primary + secondary + or_paid + or_free + avail:
         if i not in order:
             order.append(i)
@@ -181,7 +180,7 @@ class RouterState:
         if start_model_id:
             self.set_model(start_model_id)
 
-    def current(self) -> Optional[ModelEntry]:
+    def current(self) -> ModelEntry | None:
         if not self.order or self.ptr >= len(self.order):
             return None
         return CHAIN[self.order[self.ptr]]
@@ -197,7 +196,7 @@ class RouterState:
             raise RuntimeError("No hay modelos disponibles")
         return e.build()
 
-    def advance(self) -> Optional[ModelEntry]:
+    def advance(self) -> ModelEntry | None:
         if self.ptr + 1 >= len(self.order):
             return None
         self.ptr += 1
@@ -221,7 +220,7 @@ class RouterState:
 # ── Default state for the stateless info/admin endpoints ────────────────────────
 
 _routing_mode: str = "fast"
-_manual_model_id: Optional[str] = None
+_manual_model_id: str | None = None
 _lock = asyncio.Lock()
 
 
@@ -258,7 +257,7 @@ async def set_model(model_id: str) -> bool:
     return False
 
 
-def consume_manual_model() -> Optional[str]:
+def consume_manual_model() -> str | None:
     global _manual_model_id
     mid = _manual_model_id
     _manual_model_id = None
@@ -270,7 +269,7 @@ def reset() -> None:
     _manual_model_id = None
 
 
-def all_info() -> List[dict]:
+def all_info() -> list[dict]:
     return [{**e.info(), "available": e.available()} for e in CHAIN]
 
 

@@ -73,7 +73,7 @@ class TfidfRetriever:
         if not qterms or self._n == 0:
             return []
         scored: list[Hit] = []
-        for chunk, tf in zip(self._chunks, self._tf):
+        for chunk, tf in zip(self._chunks, self._tf, strict=True):
             score = 0.0
             for term, qc in qterms.items():
                 if term in tf:
@@ -97,7 +97,7 @@ def build_repo_retriever(root: str, max_files: int = 400) -> TfidfRetriever:
             try:
                 if os.path.getsize(fp) > 200_000:
                     continue
-                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                with open(fp, encoding="utf-8", errors="ignore") as f:
                     r.add(os.path.relpath(fp, root), f.read())
             except OSError:
                 continue

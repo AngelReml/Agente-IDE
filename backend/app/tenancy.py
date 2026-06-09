@@ -12,7 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from . import config, auth
+from . import auth, config
 
 
 def resolve_in_workspace(workspace_root: str, path: str) -> str:

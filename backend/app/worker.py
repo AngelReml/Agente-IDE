@@ -11,7 +11,7 @@ import os
 
 async def run_swarm_job(ctx, task: str, session_id: str = "default") -> dict:  # pragma: no cover
     """Worker task: drive a swarm run to completion, persisting events."""
-    from . import graph, store, runtime
+    from . import graph, runtime, store
     rc = runtime.new_run(task, session_id)
     store.start_run(rc.run_id, session_id, task)
     last: dict = {}

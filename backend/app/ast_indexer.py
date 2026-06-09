@@ -2,15 +2,15 @@
 Semantic AST indexer for Python/JS/TS files.
 Scans PROJECT_ROOT and stores a symbol map in .swarm/index.json.
 """
-import os
 import ast
 import json
+import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any
 
-from .config import SKIP_DIRS, INDEXED_EXTS
+from .config import INDEXED_EXTS, SKIP_DIRS
 
 _JS_PATTERNS = [
     (r'(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+(\w+)', 'function'),
@@ -22,8 +22,8 @@ _JS_PATTERNS = [
 ]
 
 
-def _index_python(content: str, filepath: str) -> List[Dict[str, Any]]:
-    symbols: List[Dict[str, Any]] = []
+def _index_python(content: str, filepath: str) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
     try:
         tree = ast.parse(content, filename=filepath)
         for node in ast.walk(tree):
@@ -55,8 +55,8 @@ def _index_python(content: str, filepath: str) -> List[Dict[str, Any]]:
     return symbols
 
 
-def _index_js(content: str) -> List[Dict[str, Any]]:
-    symbols: List[Dict[str, Any]] = []
+def _index_js(content: str) -> list[dict[str, Any]]:
+    symbols: list[dict[str, Any]] = []
     seen: set = set()
     for pattern, kind in _JS_PATTERNS:
         for m in re.finditer(pattern, content, re.MULTILINE):
@@ -69,8 +69,8 @@ def _index_js(content: str) -> List[Dict[str, Any]]:
     return symbols
 
 
-def build_index(project_root: str) -> Dict[str, Any]:
-    index: Dict[str, Any] = {
+def build_index(project_root: str) -> dict[str, Any]:
+    index: dict[str, Any] = {
         "generated_at": int(time.time()),
         "root": project_root,
         "files": {},
@@ -84,7 +84,7 @@ def build_index(project_root: str) -> Dict[str, Any]:
             full_path = os.path.join(root, fname)
             rel_path = os.path.relpath(full_path, project_root)
             try:
-                with open(full_path, 'r', encoding='utf-8', errors='ignore') as f:
+                with open(full_path, encoding='utf-8', errors='ignore') as f:
                     content = f.read()
             except Exception:
                 continue
@@ -105,18 +105,18 @@ def save_index(project_root: str) -> str:
     return f"✅ Indexed {len(idx['files'])} files, {total} symbols → .swarm/index.json"
 
 
-def load_index(project_root: str) -> Dict[str, Any]:
+def load_index(project_root: str) -> dict[str, Any]:
     idx_path = os.path.join(project_root, ".swarm", "index.json")
     if not os.path.exists(idx_path):
         return {}
     try:
-        with open(idx_path, 'r', encoding='utf-8') as f:
+        with open(idx_path, encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return {}
 
 
-def search_symbol(project_root: str, symbol: str) -> List[Dict[str, Any]]:
+def search_symbol(project_root: str, symbol: str) -> list[dict[str, Any]]:
     idx = load_index(project_root)
     results = []
     sym_lower = symbol.lower()

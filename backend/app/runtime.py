@@ -13,10 +13,8 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque
 
 from . import config
-
 
 # ── Loop detector (sliding window, fixes the "only compares to previous" bug) ───
 
@@ -28,7 +26,7 @@ class LoopDetector:
     """
 
     def __init__(self, window: int = config.LOOP_WINDOW):
-        self._window: Deque[str] = deque(maxlen=window)
+        self._window: deque[str] = deque(maxlen=window)
 
     def reset(self) -> None:
         self._window.clear()

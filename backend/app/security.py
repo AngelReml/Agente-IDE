@@ -8,15 +8,14 @@ authenticated, and the filesystem/command/network reach must be constrained.
 import hmac
 import ipaddress
 import re
-import socket
 import shlex
+import socket
 import sys
 from urllib.parse import urlparse
 
 from fastapi import Header, HTTPException, WebSocket
 
 from . import config
-
 
 # ── Request authentication ──────────────────────────────────────────────────────
 

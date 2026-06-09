@@ -7,8 +7,8 @@ no-op so the app runs locally with zero extra dependencies (Fase Q / Fase 6).
 import logging
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 logger = logging.getLogger("swarm.telemetry")
 

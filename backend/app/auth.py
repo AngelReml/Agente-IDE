@@ -18,7 +18,7 @@ import os
 import time
 from dataclasses import dataclass
 
-from fastapi import Header, HTTPException, Depends
+from fastapi import Depends, Header, HTTPException
 
 from . import config
 

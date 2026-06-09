@@ -1,6 +1,5 @@
 import os
 import time
-from typing import List
 
 MEMORIA_FILENAME = "memoria.md"
 
@@ -12,10 +11,10 @@ def initialize_memoria_if_needed(project_root: str) -> str:
     memoria_path = get_memoria_path(project_root)
     if os.path.exists(memoria_path):
         return "memoria.md ya existe."
-        
+
     project_name = os.path.basename(os.path.realpath(project_root))
     creation_date = time.strftime("%Y-%m-%d %H:%M:%S")
-    
+
     # Simple heuristic to detect stack
     stack = []
     if os.path.exists(os.path.join(project_root, "package.json")):
@@ -26,9 +25,9 @@ def initialize_memoria_if_needed(project_root: str) -> str:
         stack.append("Python")
     if os.path.exists(os.path.join(project_root, "Cargo.toml")):
         stack.append("Rust")
-        
+
     detected_stack = ", ".join(stack) if stack else "No detectado (Stack genérico)"
-    
+
     content = f"""# 🧠 Memoria del Proyecto: {project_name}
 
 > Este archivo contiene el historial de decisiones técnicas, arquitectura, riesgos y cambios críticos.
@@ -62,7 +61,7 @@ def initialize_memoria_if_needed(project_root: str) -> str:
 - Sin autenticación robusta en localhost.
 - Ejecución directa de comandos en terminal.
 """
-    
+
     try:
         os.makedirs(project_root, exist_ok=True)
         with open(memoria_path, "w", encoding="utf-8") as f:
@@ -71,7 +70,7 @@ def initialize_memoria_if_needed(project_root: str) -> str:
     except Exception as e:
         return f"Error al inicializar memoria.md: {e}"
 
-def is_high_risk_change(description: str, files: List[str]) -> bool:
+def is_high_risk_change(description: str, files: list[str]) -> bool:
     """Analyzes if the proposed modification represents a high risk.
     High risk triggers if:
     1. It touches configuration files like package.json, requirements.txt, .env, tsconfig.json, vite.config.ts, tailwind.config.ts, next.config.ts.
@@ -84,16 +83,16 @@ def is_high_risk_change(description: str, files: List[str]) -> bool:
         "vite.config.ts", "webpack.config.js", "docker-compose.yml",
         "Dockerfile", "main.py", "graph.py", "memoria.md"
     }
-    
+
     # 1. Critical files check
     for file in files:
         if os.path.basename(file) in critical_names:
             return True
-            
+
     # 2. Touch count check
     if len(files) >= 3:
         return True
-        
+
     # 3. Keyword check
     high_risk_keywords = {
         "refactor", "arquitectura", "eliminar", "borrar", "base de datos",
@@ -104,7 +103,7 @@ def is_high_risk_change(description: str, files: List[str]) -> bool:
     for kw in high_risk_keywords:
         if kw in desc_lower:
             return True
-            
+
     return False
 
 def get_last_changelog_lines(project_root: str, n: int = 15) -> str:
@@ -113,7 +112,7 @@ def get_last_changelog_lines(project_root: str, n: int = 15) -> str:
     if not os.path.exists(memoria_path):
         return ""
     try:
-        with open(memoria_path, "r", encoding="utf-8") as f:
+        with open(memoria_path, encoding="utf-8") as f:
             content = f.read()
         # Find the changelog table
         table_start = content.find("| Fecha | Cambio Realizado |")
@@ -132,33 +131,33 @@ def get_last_changelog_lines(project_root: str, n: int = 15) -> str:
         return ""
 
 
-def add_changelog_entry(project_root: str, description: str, files: List[str], risk_level: str, agent_name: str = "Swarm-Agent") -> bool:
+def add_changelog_entry(project_root: str, description: str, files: list[str], risk_level: str, agent_name: str = "Swarm-Agent") -> bool:
     """Appends an entry to the '## 📝 Historial de Cambios' table in memoria.md."""
     memoria_path = get_memoria_path(project_root)
     if not os.path.exists(memoria_path):
         initialize_memoria_if_needed(project_root)
-        
+
     try:
-        with open(memoria_path, "r", encoding="utf-8") as f:
+        with open(memoria_path, encoding="utf-8") as f:
             content = f.read()
-            
+
         # Format the files list
         files_str = ", ".join([f"`{os.path.basename(f)}`" for f in files])
         if not files_str:
             files_str = "-"
-            
+
         date_str = time.strftime("%Y-%m-%d %H:%M:%S")
         new_row = f"| {date_str} | {description} | {files_str} | {risk_level} | {agent_name} |\n"
-        
+
         # Insert row below the table header
         table_header = "| Fecha | Cambio Realizado | Archivos Modificados | Riesgo | Agente |\n|-------|------------------|----------------------|--------|--------|"
-        
+
         if table_header in content:
             content = content.replace(table_header, table_header + "\n" + new_row)
         else:
             # Fallback append if header is not exact or missing
             content += f"\n\n### Cambio no registrado en tabla ({date_str})\n- **Cambio**: {description}\n- **Archivos**: {files_str}\n- **Riesgo**: {risk_level}\n- **Agente**: {agent_name}\n"
-            
+
         with open(memoria_path, "w", encoding="utf-8") as f:
             f.write(content)
         return True

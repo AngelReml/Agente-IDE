@@ -8,7 +8,6 @@ helper for log correlation. Render output is unit-tested.
 import threading
 import uuid
 
-
 _MAX_SERIES = 2000  # hard cap to prevent unbounded-cardinality memory growth
 
 

@@ -1,17 +1,17 @@
-import os
-import sys
 import json
+import logging
+import os
+import re
 import shutil
 import subprocess
-import logging
-import re
+import sys
 from pathlib import Path
-from typing import Optional
+
 from langchain_core.tools import tool
 
-from . import safe_fs, memoria_manager, state_context, ast_indexer, config, security
+from . import ast_indexer, config, memoria_manager, safe_fs, security, state_context
 from .agents import subagents
-from .config import project_root, SKIP_DIRS, MAX_FILE_BYTES
+from .config import MAX_FILE_BYTES, SKIP_DIRS, project_root
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def read_file(path: str) -> str:
     size = os.path.getsize(full)
     if size > MAX_FILE_BYTES:
         return f"File too large ({size:,} bytes)."
-    with open(full, "r", encoding="utf-8", errors="replace") as f:
+    with open(full, encoding="utf-8", errors="replace") as f:
         content = f.read()
     if os.path.basename(full).lower() == "memoria.md":
         state_context.mark_memoria_read()
@@ -159,7 +159,7 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     try:
         # Strict UTF-8: a read-modify-write with errors="replace" would silently
         # turn undecodable bytes into U+FFFD and PERSIST that, corrupting the file.
-        with open(full_path, "r", encoding="utf-8") as f:
+        with open(full_path, encoding="utf-8") as f:
             content = f.read()
     except UnicodeDecodeError:
         return (f"❌ {path} no es UTF-8 válido; editarlo lo corrompería. "
@@ -229,7 +229,7 @@ def apply_patch(patch: str) -> str:
         base = staged.get(full)
         if base is None:
             try:
-                with open(full, "r", encoding="utf-8") as fh:
+                with open(full, encoding="utf-8") as fh:
                     base = fh.read()
             except UnicodeDecodeError:
                 return f"❌ apply_patch[{i}]: {path} no es UTF-8 válido; no se edita para no corromperlo."
@@ -306,7 +306,7 @@ def preview_changes(path: str, content: str) -> str:
     if os.path.exists(resolved):
         if os.path.isdir(resolved):
             return f"'{path}' es un directorio."
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             old_content = f.read()
     diff = safe_fs.get_diff(old_content, content, os.path.basename(resolved))
     return diff or "No hay cambios respecto al archivo actual."
@@ -344,7 +344,7 @@ def read_plan() -> str:
     p = _plan_path()
     if not os.path.exists(p):
         return "No hay plan activo. Crea uno con update_plan."
-    with open(p, "r", encoding="utf-8") as f:
+    with open(p, encoding="utf-8") as f:
         return f.read()
 
 
@@ -452,8 +452,8 @@ def fetch_url(url: str, as_json: bool = False) -> str:
     Private/loopback/link-local destinations are blocked (SSRF protection).
     Set as_json=True to pretty-print JSON. Returns up to 50,000 characters.
     """
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     blocked = security.validate_outbound_url(url)
     if blocked:
@@ -522,7 +522,7 @@ def grep_search(query: str, path: str = ".") -> str:
             except OSError:
                 continue
             try:
-                with open(fp, "r", encoding="utf-8", errors="ignore") as f:
+                with open(fp, encoding="utf-8", errors="ignore") as f:
                     for ln, line in enumerate(f, 1):
                         if pattern.search(line):
                             results.append(f"{os.path.relpath(fp, project_root())}:{ln}: {line.strip()}")
@@ -573,7 +573,7 @@ def git_status() -> str:
 
 
 @tool
-def git_diff(path: Optional[str] = None) -> str:
+def git_diff(path: str | None = None) -> str:
     """Show unstaged diff. Pass path for a specific file."""
     ensure_project()
     args = ["diff"]
@@ -646,7 +646,7 @@ async def delegate_review(path: str, proposed_content: str) -> str:
         return str(e)
     old_content = ""
     if os.path.exists(resolved):
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             old_content = f.read()
     diff = safe_fs.get_diff(old_content, proposed_content, os.path.basename(resolved))
     if not diff:

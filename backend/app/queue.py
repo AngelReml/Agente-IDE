@@ -13,10 +13,9 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Awaitable, Callable, Optional
-
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +28,9 @@ class Job:
     kind: str
     status: str = "queued"  # queued | running | done | error
     result: object = None
-    error: Optional[str] = None
+    error: str | None = None
     created_at: float = field(default_factory=time.time)
-    ended_at: Optional[float] = None
+    ended_at: float | None = None
 
 
 class InProcessQueue:
@@ -65,7 +64,7 @@ class InProcessQueue:
         self._tasks[job_id] = asyncio.create_task(runner())
         return job_id
 
-    def get(self, job_id: str) -> Optional[Job]:
+    def get(self, job_id: str) -> Job | None:
         return self._jobs.get(job_id)
 
     def list(self) -> list[Job]:

@@ -38,7 +38,7 @@ def build_graph(root: str | None = None) -> dict[str, list[str]]:
             full = os.path.join(dp, fname)
             rel = os.path.relpath(full, root)
             try:
-                with open(full, "r", encoding="utf-8", errors="ignore") as f:
+                with open(full, encoding="utf-8", errors="ignore") as f:
                     graph[rel] = parse_imports(rel, f.read())
             except OSError:
                 continue

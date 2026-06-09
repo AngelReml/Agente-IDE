@@ -54,6 +54,7 @@ class PostgresBackend:
 
     def start_run(self, run_id, session_id, task):  # pragma: no cover
         import time
+
         from sqlalchemy import text
         with self.engine.begin() as c:
             c.execute(text("INSERT INTO runs (id, session_id, task, status, started_at) "
@@ -62,6 +63,7 @@ class PostgresBackend:
 
     def record_event(self, run_id, etype, content="", tool=None):  # pragma: no cover
         import time
+
         from sqlalchemy import text
         with self.engine.begin() as c:
             c.execute(text("INSERT INTO events (run_id, ts, type, tool, content) VALUES (:r,:ts,:e,:to,:c)"),
@@ -69,6 +71,7 @@ class PostgresBackend:
 
     def finish_run(self, run_id, status, provider, model, cost):  # pragma: no cover
         import time
+
         from sqlalchemy import text
         with self.engine.begin() as c:
             c.execute(text("UPDATE runs SET status=:s, provider=:p, model=:m, input_tokens=:it, "

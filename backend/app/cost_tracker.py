@@ -9,11 +9,10 @@ function and the cumulative session total.
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
 logger = logging.getLogger(__name__)
 
-_PRICING: Dict[str, Dict[str, Tuple[float, float]]] = {
+_PRICING: dict[str, dict[str, tuple[float, float]]] = {
     "anthropic": {
         "claude-opus-4-5":   (5.0,  25.0),   # Opus 4.5 pricing (was wrongly the Opus 4.1 tier 15/75)
         "claude-sonnet-4-5": (3.0,  15.0),
@@ -51,7 +50,7 @@ _PRICING: Dict[str, Dict[str, Tuple[float, float]]] = {
 }
 
 
-def price(provider: str, model: str) -> Tuple[float, float]:
+def price(provider: str, model: str) -> tuple[float, float]:
     return _PRICING.get(provider, {}).get(model, (0.0, 0.0))
 
 

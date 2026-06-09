@@ -17,10 +17,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install fastapi pydantic pytest ruff
-      - name: Lint — real bugs (gate)
-        run: ruff check backend/app --select E9,F   # undefined names / unused imports → FAIL the build
-      - name: Lint — style (informational)
-        run: ruff check backend/app || true         # full ruleset, non-blocking until baseline is clean
+      - name: Lint (ruff — gate)
+        run: ruff check backend/app   # full ruleset (E,F,W,I,UP,B) — baseline is clean, so this FAILS on any regression
       - name: Tests
         run: cd backend && python -m pytest -q
       - name: Evals (estructura; se omiten sin claves)

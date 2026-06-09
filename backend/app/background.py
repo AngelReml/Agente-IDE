@@ -10,7 +10,7 @@ from __future__ import annotations  # method named `list` would shadow builtin i
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass

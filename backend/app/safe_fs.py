@@ -5,14 +5,13 @@ PROJECT_ROOT is now read at runtime (via config) instead of being frozen at
 import time, so switching projects no longer leaves stale roots behind. Backup
 storage uses a hashed bucket per file to make backup-dir escape impossible.
 """
+import difflib
 import hashlib
 import os
 import shutil
 import tempfile
 import time
-import difflib
 from pathlib import Path
-from typing import Optional, List, Tuple
 
 from . import config
 
@@ -64,7 +63,7 @@ def _backup_bucket(resolved_path: str) -> str:
     return os.path.join(_backup_dir(), f"{hint}.{digest}")
 
 
-def backup_file(resolved_path: str) -> Optional[str]:
+def backup_file(resolved_path: str) -> str | None:
     if not os.path.exists(resolved_path) or os.path.isdir(resolved_path):
         return None
     ensure_swarm_dirs()
@@ -93,7 +92,7 @@ def get_diff(old_content: str, new_content: str, filename: str = "file") -> str:
     return "".join(diff)
 
 
-def write_file_safe(path: str, content: str, overwrite_external: bool = False) -> Tuple[str, str, Optional[str]]:
+def write_file_safe(path: str, content: str, overwrite_external: bool = False) -> tuple[str, str, str | None]:
     try:
         resolved = resolve_and_validate_path(path, allow_external=False)
     except ValueError:
@@ -107,7 +106,7 @@ def write_file_safe(path: str, content: str, overwrite_external: bool = False) -
     if os.path.exists(resolved):
         if os.path.isdir(resolved):
             raise IsADirectoryError(f"'{path}' es un directorio, no se puede escribir.")
-        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             old_content = f.read()
         backup_p = backup_file(resolved)
         if backup_p is None:
@@ -136,7 +135,7 @@ def write_file_safe(path: str, content: str, overwrite_external: bool = False) -
     return resolved, diff_out, backup_p
 
 
-def delete_file_safe(path: str, confirmed_external: bool = False) -> Tuple[str, bool]:
+def delete_file_safe(path: str, confirmed_external: bool = False) -> tuple[str, bool]:
     try:
         resolved = resolve_and_validate_path(path, allow_external=False)
     except ValueError:
@@ -159,7 +158,7 @@ def delete_file_safe(path: str, confirmed_external: bool = False) -> Tuple[str, 
     return resolved, True
 
 
-def list_backups(path: str) -> List[Tuple[str, int]]:
+def list_backups(path: str) -> list[tuple[str, int]]:
     resolved = resolve_and_validate_path(path, allow_external=False)
     bucket = _backup_bucket(resolved)
     if not os.path.exists(bucket):

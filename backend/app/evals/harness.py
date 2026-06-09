@@ -14,9 +14,8 @@ import asyncio
 import os
 import subprocess
 import tempfile
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
-
 
 # ── Assertions (pure, testable) ─────────────────────────────────────────────────
 
@@ -67,7 +66,7 @@ class EvalResult:
     id: str
     passed: bool
     checks: list[tuple[bool, str]]
-    error: Optional[str] = None
+    error: str | None = None
 
 
 async def run_task(task: EvalTask, agent: AgentRunner) -> EvalResult:

@@ -1,22 +1,27 @@
-import logging
 import asyncio
-from typing import AsyncGenerator, Dict, Any, List
+import logging
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from langchain_core.messages import (
-    HumanMessage, ToolMessage, BaseMessage, messages_to_dict, messages_from_dict,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+    messages_from_dict,
+    messages_to_dict,
 )
 from langgraph.prebuilt import create_react_agent
 
-from . import smart_router, cost_tracker, state_context, memoria_manager, store, config, runtime, prompts
-from .smart_router import RouterState, is_retriable, PROVIDER_COLORS, get_routing_mode, consume_manual_model
-from .tools import ALL_TOOLS, ensure_project
+from . import config, cost_tracker, memoria_manager, prompts, runtime, smart_router, state_context, store
 from .config import project_root
+from .smart_router import PROVIDER_COLORS, RouterState, consume_manual_model, get_routing_mode, is_retriable
+from .tools import ALL_TOOLS, ensure_project
 
 logger = logging.getLogger(__name__)
 
 # ── Session history (now persisted per-project via store) ───────────────────────
 
-_session_messages: List[BaseMessage] = []
+_session_messages: list[BaseMessage] = []
 
 
 def _trim_tool(msg: ToolMessage) -> ToolMessage:
@@ -139,7 +144,7 @@ def _check_state_guard() -> str | None:
 
 # ── Streaming agent ───────────────────────────────────────────────────────────────
 
-async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGenerator[Dict[str, Any], None]:
+async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGenerator[dict[str, Any], None]:
     ensure_project()
     state_context.reset_session()
 
