@@ -10,6 +10,9 @@ services:
   postgres:
     # pgvector/pgvector trae la extensión `vector` precompilada (la usa el
     # EmbeddingRetriever cuando SWARM_VECTOR_STORE=pgvector). Drop-in de postgres:16.
+    # El rol crea la extensión al primer uso (CREATE EXTENSION IF NOT EXISTS vector);
+    # el superuser por defecto puede. En Postgres gestionado (RDS/Cloud SQL) hay que
+    # permitir 'vector' en la allowlist de extensiones, o el retriever cae a memoria.
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-swarm}
@@ -56,6 +59,13 @@ services:
     # Solo accesible dentro de la red del compose; nunca publicado al host.
     expose: ["2375"]
     restart: unless-stopped
+    # /_ping lo permite el proxy por defecto; wget viene en la base alpine/busybox.
+    # Así la API espera a que el proxy esté LISTO (no solo arrancado) antes de usarlo.
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:2375/_ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   api:
     build:
@@ -82,7 +92,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-      docker-proxy: { condition: service_started }
+      docker-proxy: { condition: service_healthy }
 
 volumes:
   pgdata:
