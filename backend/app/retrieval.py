@@ -232,7 +232,10 @@ class PgVectorStore:
     def __init__(self, dsn: str | None = None, dim: int | None = None,
                  namespace: str = "default", conn=None) -> None:
         self._dsn = dsn or config.database_url()
-        self._dim = dim or config.embedding_dim()
+        # Dimension is derived from the actual embeddings on first use (so it always
+        # matches the model and a SWARM_EMBED_MODEL change can't desync it). An
+        # explicit `dim` still overrides, e.g. in tests.
+        self._dim = dim
         self._ns = namespace
         self._conn = conn
         self._ready = False
@@ -258,7 +261,17 @@ class PgVectorStore:
         """pgvector text literal: '[0.1,0.2,…]' (cast with ::vector in SQL)."""
         return "[" + ",".join(repr(float(x)) for x in vec) + "]"
 
-    def _ensure(self) -> None:
+    def _probe(self) -> None:
+        """Eager connectivity + extension check (no table yet — dim still unknown).
+        Run at retriever-build time so an unreachable DB or a missing privilege to
+        `CREATE EXTENSION vector` surfaces immediately and falls back to memory,
+        instead of failing silently mid-run."""
+        conn = self._connection()
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        conn.commit()
+
+    def _ensure_table(self) -> None:
         if self._ready:
             return
         conn = self._connection()
@@ -277,22 +290,32 @@ class PgVectorStore:
     def add(self, items: list[tuple[str, int, str, list[float]]]) -> None:
         if not items:
             return
-        self._ensure()
+        if self._dim is None:
+            self._dim = len(items[0][3])  # derive column dimension from the embeddings
+        bad = next((len(v) for _p, _s, _t, v in items if len(v) != self._dim), None)
+        if bad is not None:
+            raise ValueError(
+                f"embedding dim {bad} != store dim {self._dim} — el modelo de embeddings "
+                f"cambió de dimensión; revisa SWARM_EMBED_MODEL/SWARM_EMBED_DIM")
+        self._ensure_table()
         conn = self._connection()
         paths = sorted({p for p, _s, _t, _v in items})
+        params = [(self._ns, p, sl, t, self._lit(v)) for p, sl, t, v in items]
         with conn.cursor() as cur:
             # Re-indexing a file replaces its previous chunks (incremental rebuilds).
             cur.execute("DELETE FROM swarm_chunks WHERE namespace=%s AND path = ANY(%s)",
                         (self._ns, paths))
-            for path, start_line, text, vec in items:
-                cur.execute(
-                    "INSERT INTO swarm_chunks (namespace, path, start_line, text, embedding) "
-                    "VALUES (%s,%s,%s,%s,%s::vector)",
-                    (self._ns, path, start_line, text, self._lit(vec)))
+            # One batched round-trip instead of one INSERT per chunk.
+            cur.executemany(
+                "INSERT INTO swarm_chunks (namespace, path, start_line, text, embedding) "
+                "VALUES (%s,%s,%s,%s,%s::vector)",
+                params)
         conn.commit()
 
     def search(self, qvec: list[float], k: int) -> list[Hit]:
-        self._ensure()
+        if self._dim is None:
+            self._dim = len(qvec)  # query vector has the model dimension too
+        self._ensure_table()
         conn = self._connection()
         lit = self._lit(qvec)
         with conn.cursor() as cur:
@@ -320,7 +343,7 @@ def make_vector_store(namespace: str = "default") -> VectorStore:
     if config.vector_store() == "pgvector" and config.database_url():
         try:
             store = PgVectorStore(namespace=namespace)
-            store._ensure()  # connect + create extension/table now; failure → fallback
+            store._probe()  # connect + ensure extension now; failure → memory fallback
             return store
         except Exception as e:
             logger.warning("PgVectorStore no disponible (%s); usando memoria.", e)

@@ -19,6 +19,9 @@ class _FakeCursor:
     def execute(self, sql, params=None):
         self.conn.calls.append((" ".join(sql.split()), params))
 
+    def executemany(self, sql, seq):
+        self.conn.calls.append((" ".join(sql.split()), list(seq)))
+
     def fetchall(self):
         return self.conn.rows
 
@@ -56,8 +59,8 @@ def test_pgvector_falls_back_when_connection_fails(monkeypatch):
     def boom(self):
         raise RuntimeError("no postgres")
 
-    monkeypatch.setattr(retrieval.PgVectorStore, "_ensure", boom)
-    # Unreachable DB must degrade to memory, never crash the run.
+    monkeypatch.setattr(retrieval.PgVectorStore, "_probe", boom)
+    # Unreachable DB / missing CREATE EXTENSION privilege must degrade to memory.
     assert isinstance(retrieval.make_vector_store(), retrieval.MemoryVectorStore)
 
 
@@ -90,9 +93,27 @@ def test_pgvector_add_emits_ddl_and_insert():
     assert any("CREATE TABLE IF NOT EXISTS swarm_chunks" in s and "vector(3)" in s for s in sqls)
     assert any("ivfflat" in s and "vector_cosine_ops" in s for s in sqls)
     assert any(s.startswith("DELETE FROM swarm_chunks") for s in sqls)
+    # INSERT is batched via executemany → params recorded as a list of tuples.
     ins = [c for c in conn.calls if c[0].startswith("INSERT INTO swarm_chunks")]
-    assert ins and ins[0][1] == ("ns", "a.py", 1, "code", "[0.1,0.2,0.3]")
+    assert ins and ins[0][1] == [("ns", "a.py", 1, "code", "[0.1,0.2,0.3]")]
     assert conn.commits >= 1
+
+
+def test_pgvector_derives_dim_from_embeddings():
+    # No explicit dim → the column dimension comes from the actual vectors, so a
+    # model-dimension change can't desync the schema (R4).
+    conn = _FakeConn()
+    store = retrieval.PgVectorStore(namespace="ns", conn=conn)
+    store.add([("a.py", 1, "code", [0.1, 0.2, 0.3, 0.4])])
+    assert any("vector(4)" in c[0] for c in conn.calls)
+
+
+def test_pgvector_rejects_dim_mismatch():
+    import pytest
+    conn = _FakeConn()
+    store = retrieval.PgVectorStore(dim=3, namespace="ns", conn=conn)
+    with pytest.raises(ValueError, match="dim"):
+        store.add([("a.py", 1, "code", [0.1, 0.2])])  # 2 != configured 3
 
 
 def test_pgvector_ddl_runs_once():
