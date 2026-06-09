@@ -204,13 +204,13 @@ export default function SwarmIDE() {
   useEffect(() => {
     fetchProject().then((r) => { setProjectPath(r.path); setProjectInput(r.path) }).catch(() => {})
     fetchRecentProjects().then(setRecentProjects).catch(() => {})
-    fetchRoutingMode().then(setRoutingModeState).catch(() => {})
+    fetchRoutingMode(sessionIdRef.current).then(setRoutingModeState).catch(() => {})
   }, [])
 
   const handleToggleMode = useCallback(async () => {
     const next: 'fast' | 'power' = routingMode === 'fast' ? 'power' : 'fast'
     setRoutingModeState(next)
-    await setRoutingMode(next).catch(() => {})
+    await setRoutingMode(next, sessionIdRef.current).catch(() => {})
   }, [routingMode])
 
   useEffect(() => {
@@ -328,7 +328,7 @@ export default function SwarmIDE() {
             setFileTreeRefresh((n) => n + 1)
             setAgentRefresh((n) => n + 1)
             // B3: read the real cumulative session cost from the backend.
-            fetchCost().then((c) => setSessionCost(c.session.cost_usd)).catch(() => {})
+            fetchCost(sessionIdRef.current).then((c) => setSessionCost(c.session.cost_usd)).catch(() => {})
             fetchChatContext().then((r) => setContextMsgCount(r.messages))
             const cur = activeFileRef.current
             if (cur) {
@@ -366,7 +366,7 @@ export default function SwarmIDE() {
 
   const handleModelSelect = useCallback(async (modelId: string) => {
     try {
-      await selectModel(modelId)
+      await selectModel(modelId, sessionIdRef.current)
       setActiveModel(modelId)
       setAgentRefresh((n) => n + 1)
       const health = await checkHealth()

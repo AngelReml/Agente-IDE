@@ -115,6 +115,18 @@ def list_runs(session_id: str | None = None, limit: int = 50) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+def session_cost(session_id: str) -> dict:
+    """Aggregate token/cost totals for a session from its persisted runs."""
+    init()
+    with _lock, _connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(input_tokens),0) AS i, COALESCE(SUM(output_tokens),0) AS o, "
+            "COALESCE(SUM(cost_usd),0.0) AS c FROM runs WHERE session_id=?",
+            (session_id,),
+        ).fetchone()
+    return {"input_tokens": row["i"], "output_tokens": row["o"], "cost_usd": round(row["c"], 6)}
+
+
 def get_run_events(run_id: str, limit: int = 2000) -> list[dict]:
     init()
     with _lock, _connect() as conn:

@@ -206,8 +206,10 @@ async def _run_subtask(st: SubTask, root_task: str, context: dict[str, str],
             pass
     prompt = f"{ROLE_PROMPT.get(st.role, '')}\n\nOBJETIVO GLOBAL: {root_task}\n\nTU SUBTAREA: {st.goal}{ctx_block}"
 
+    from . import runtime
     from .smart_router import is_retriable
-    state = RouterState(mode=get_routing_mode())
+    _sess = runtime.SESSIONS.get(session_id)
+    state = RouterState(mode=_sess.routing_mode or get_routing_mode())
     # Per-subtask model fallback: a 429/quota error advances to the next model
     # instead of killing the subtask (the single-agent path already did this; the
     # swarm used to lack it, so one provider hiccup tumbled a whole subtask).

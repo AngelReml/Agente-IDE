@@ -78,10 +78,18 @@ class RunContext:
 @dataclass
 class Session:
     id: str
-    routing_mode: str = "fast"
+    # None means "inherit the process-wide default" (smart_router.get_routing_mode());
+    # set explicitly to isolate this session's routing from others.
+    routing_mode: str | None = None
     manual_model: str | None = None
     created_at: float = field(default_factory=time.time)
     last_active: float = field(default_factory=time.time)
+
+    def consume_manual_model(self) -> str | None:
+        """Return the pinned model once, then clear it (one-shot, like the global)."""
+        m = self.manual_model
+        self.manual_model = None
+        return m
 
 
 class SessionManager:

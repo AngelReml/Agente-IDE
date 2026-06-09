@@ -25,8 +25,10 @@ from . import (
     diff_parser,
     metrics,
     orchestrator,
+    runtime,
     safe_fs,
     security,
+    smart_router,
     store,
 )
 from .config import MAX_FILE_BYTES, SKIP_DIRS, project_root
@@ -127,6 +129,12 @@ class FileWriteRequest(BaseModel):
 
 class ModelSelectRequest(BaseModel):
     model_id: str
+    session_id: str | None = Field(default=None, max_length=64)
+
+
+class RoutingModeRequest(BaseModel):
+    mode: str = "fast"
+    session_id: str | None = Field(default=None, max_length=64)
 
 
 class RestoreRequest(BaseModel):
@@ -361,22 +369,33 @@ def reset_models():
 
 
 @app.get("/api/routing/mode")
-def get_mode():
+def get_mode(session_id: str | None = Query(default=None)):
+    if session_id:
+        sess = runtime.SESSIONS.get(session_id)
+        return {"mode": sess.routing_mode or get_routing_mode()}
     return {"mode": get_routing_mode()}
 
 
 @app.post("/api/routing/mode", dependencies=[Depends(require_auth)])
-def update_routing_mode(body: dict):
-    try:
-        return {"status": "ok", "mode": set_routing_mode(body.get("mode", "fast"))}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
+def update_routing_mode(req: RoutingModeRequest):
+    if req.mode not in ("fast", "power"):
+        raise HTTPException(400, f"Modo desconocido: {req.mode}. Usa 'fast' o 'power'.")
+    if req.session_id:
+        # Per-session: don't touch the global default that other sessions inherit.
+        runtime.SESSIONS.get(req.session_id).routing_mode = req.mode
+    else:
+        set_routing_mode(req.mode)
+    return {"status": "ok", "mode": req.mode}
 
 
 @app.post("/api/models/select", dependencies=[Depends(require_auth)])
 async def select_model(req: ModelSelectRequest):
-    if not await set_model(req.model_id):
+    if not smart_router.model_available(req.model_id):
         raise HTTPException(400, f"Model not found or unavailable: {req.model_id}")
+    if req.session_id:
+        runtime.SESSIONS.get(req.session_id).manual_model = req.model_id
+    else:
+        await set_model(req.model_id)
     return {"status": "ok", "current": current_info()}
 
 
@@ -469,8 +488,11 @@ def rebuild_index():
 # ── Cost tracking ─────────────────────────────────────────────────────────────
 
 @app.get("/api/cost", dependencies=[Depends(require_auth)])
-def get_cost():
-    return {"run": cost_tracker.run_stats(), "session": cost_tracker.session_stats()}
+def get_cost(session_id: str | None = Query(default=None)):
+    # With session_id, report that session's aggregate from its persisted runs;
+    # otherwise the process-wide totals (back-compat).
+    session_stats = store.session_cost(session_id) if session_id else cost_tracker.session_stats()
+    return {"run": cost_tracker.run_stats(), "session": session_stats}
 
 
 # ── Runs (persistence) ────────────────────────────────────────────────────────

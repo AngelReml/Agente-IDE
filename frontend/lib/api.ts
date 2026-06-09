@@ -80,8 +80,8 @@ export async function fetchModels(): Promise<ModelsResponse> {
   return res.json()
 }
 
-export async function selectModel(modelId: string): Promise<void> {
-  const res = await fetch(`${API}/api/models/select`, { method: 'POST', headers: JSON_HEADERS(), body: JSON.stringify({ model_id: modelId }) })
+export async function selectModel(modelId: string, sessionId?: string): Promise<void> {
+  const res = await fetch(`${API}/api/models/select`, { method: 'POST', headers: JSON_HEADERS(), body: JSON.stringify({ model_id: modelId, session_id: sessionId }) })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
 }
 
@@ -141,9 +141,10 @@ export async function runSwarmTask(
 
 // ── Routing mode ──────────────────────────────────────────────────────────────
 
-export async function fetchRoutingMode(): Promise<'fast' | 'power'> {
+export async function fetchRoutingMode(sessionId?: string): Promise<'fast' | 'power'> {
   try {
-    const res = await fetch(`${API}/api/routing/mode`, { headers: headers(), signal: AbortSignal.timeout(3000) })
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+    const res = await fetch(`${API}/api/routing/mode${q}`, { headers: headers(), signal: AbortSignal.timeout(3000) })
     if (!res.ok) return 'fast'
     return (await res.json()).mode === 'power' ? 'power' : 'fast'
   } catch {
@@ -151,18 +152,20 @@ export async function fetchRoutingMode(): Promise<'fast' | 'power'> {
   }
 }
 
-export async function setRoutingMode(mode: 'fast' | 'power'): Promise<void> {
-  await fetch(`${API}/api/routing/mode`, { method: 'POST', headers: JSON_HEADERS(), body: JSON.stringify({ mode }) })
+export async function setRoutingMode(mode: 'fast' | 'power', sessionId?: string): Promise<void> {
+  const res = await fetch(`${API}/api/routing/mode`, { method: 'POST', headers: JSON_HEADERS(), body: JSON.stringify({ mode, session_id: sessionId }) })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
 }
 
 // ── Cost tracking ─────────────────────────────────────────────────────────────
 
 interface CostStats { input_tokens: number; output_tokens: number; cost_usd: number }
 
-export async function fetchCost(): Promise<{ run: CostStats; session: CostStats }> {
+export async function fetchCost(sessionId?: string): Promise<{ run: CostStats; session: CostStats }> {
   const zero = { input_tokens: 0, output_tokens: 0, cost_usd: 0 }
   try {
-    const res = await fetch(`${API}/api/cost`, { headers: headers(), signal: AbortSignal.timeout(3000) })
+    const q = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''
+    const res = await fetch(`${API}/api/cost${q}`, { headers: headers(), signal: AbortSignal.timeout(3000) })
     if (!res.ok) return { run: zero, session: zero }
     return res.json()
   } catch {

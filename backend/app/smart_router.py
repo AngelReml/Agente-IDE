@@ -134,6 +134,11 @@ def available_indices() -> list[int]:
     return [i for i, e in enumerate(CHAIN) if e.available()]
 
 
+def model_available(model_id: str) -> bool:
+    """True if `model_id` is a known model whose API key is present."""
+    return any(e.model_id == model_id and e.available() for e in CHAIN)
+
+
 def build_order(mode: str) -> list[int]:
     """Full priority-ordered list of available model indices.
 

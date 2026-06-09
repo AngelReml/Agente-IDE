@@ -157,7 +157,11 @@ async def run_swarm_stream(task: str, session_id: str = "default") -> AsyncGener
         store.finish_run(ctx.run_id, "error", None, None, ctx.cost.stats())
         return
 
-    state = RouterState(mode=get_routing_mode(), start_model_id=consume_manual_model())
+    # Per-session routing: each session owns its mode/pinned model so concurrent
+    # sessions don't clobber each other (falls back to the global default).
+    sess = runtime.SESSIONS.get(session_id)
+    state = RouterState(mode=sess.routing_mode or get_routing_mode(),
+                        start_model_id=sess.consume_manual_model() or consume_manual_model())
 
     hist = list(_session_messages)
     if hist:
