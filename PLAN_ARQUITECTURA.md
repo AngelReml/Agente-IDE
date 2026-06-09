@@ -203,9 +203,11 @@ Cada fase: rama propia, tests nuevos, feature-flag, y el modo local de un clic
 
 ### Estado a 9 jun 2026
 Fases 1–5 y 7 **completas**; Fase 6 **parcial** (◑): `--runtime` endurecido por
-`SWARM_SANDBOX_RUNTIME` y cuotas de recursos por workspace (`tenancy.limits_for`)
-están hechas y testeadas; queda el paso 4 (mover la ejecución del sandbox a un
-worker out-of-process para que la API solo encole). Suite: 98 tests en verde.
+`SWARM_SANDBOX_RUNTIME` y cuotas de recursos por workspace **ya aplicadas en el
+ejecutor** (`tools` → `tenancy.limits_for_root` → `backend.run(limits=…)`); queda
+solo el paso 4 (mover la ejecución del sandbox a un worker out-of-process para que
+la API solo encole). Suite: 101 tests en verde; CI endurecido (deps reales + ruff
+fijado).
 
 Flags introducidos: `SWARM_SANDBOX_RUNTIME`, `DOCKER_HOST`, `SWARM_SANDBOX_CPUS`,
 `SWARM_SANDBOX_PIDS`, `SWARM_VECTOR_STORE` (memory|pgvector), `SWARM_EMBED_DIM`.
