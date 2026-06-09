@@ -62,6 +62,9 @@ LOCAL_OWNER = Principal(user_id="local", workspace="default", role="owner")
 def issue_token(user_id: str, workspace: str = "default", role: str = "owner", ttl_seconds: int = 86400) -> str:
     if role not in ROLES:
         raise ValueError(f"Rol inválido: {role}")
+    if not _secret():
+        # Fail closed: refuse to sign with an empty key (would be trivially forgeable).
+        raise ValueError("No hay secreto configurado (define SWARM_SECRET para emitir tokens).")
     payload = {"sub": user_id, "ws": workspace, "role": role, "exp": int(time.time()) + ttl_seconds}
     body = _b64(json.dumps(payload, separators=(",", ":")).encode())
     sig = _b64(hmac.new(_secret(), body.encode(), hashlib.sha256).digest())
@@ -69,6 +72,10 @@ def issue_token(user_id: str, workspace: str = "default", role: str = "owner", t
 
 
 def verify_token(token: str) -> Principal | None:
+    if not _secret():
+        # Fail closed: with no signing key, no token can be trusted (an empty-key
+        # HMAC is forgeable by anyone). Reject everything.
+        return None
     try:
         body, sig = token.split(".", 1)
         expected = _b64(hmac.new(_secret(), body.encode(), hashlib.sha256).digest())

@@ -160,7 +160,7 @@ def delete_file_safe(path: str, confirmed_external: bool = False) -> Tuple[str, 
 
 
 def list_backups(path: str) -> List[Tuple[str, int]]:
-    resolved = resolve_and_validate_path(path, allow_external=True)
+    resolved = resolve_and_validate_path(path, allow_external=False)
     bucket = _backup_bucket(resolved)
     if not os.path.exists(bucket):
         return []
@@ -177,7 +177,7 @@ def list_backups(path: str) -> List[Tuple[str, int]]:
 
 
 def restore_backup(path: str, timestamp: int) -> str:
-    resolved = resolve_and_validate_path(path, allow_external=True)
+    resolved = resolve_and_validate_path(path, allow_external=False)
     for bp, ts in list_backups(path):
         if ts == timestamp:
             backup_file(resolved)

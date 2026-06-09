@@ -9,6 +9,9 @@ import threading
 import uuid
 
 
+_MAX_SERIES = 2000  # hard cap to prevent unbounded-cardinality memory growth
+
+
 class Metrics:
     def __init__(self) -> None:
         self._counters: dict[tuple, float] = {}
@@ -18,11 +21,15 @@ class Metrics:
     def inc(self, name: str, value: float = 1.0, **labels) -> None:
         key = (name, tuple(sorted(labels.items())))
         with self._lock:
+            if key not in self._counters and len(self._counters) >= _MAX_SERIES:
+                return  # drop new series past the cap (guards against label explosions)
             self._counters[key] = self._counters.get(key, 0.0) + value
 
     def set_gauge(self, name: str, value: float, **labels) -> None:
         key = (name, tuple(sorted(labels.items())))
         with self._lock:
+            if key not in self._gauges and len(self._gauges) >= _MAX_SERIES:
+                return
             self._gauges[key] = value
 
     def value(self, name: str, **labels) -> float:

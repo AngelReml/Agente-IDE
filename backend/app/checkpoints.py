@@ -31,6 +31,8 @@ def create_checkpoint(label: str = "") -> dict:
             full = os.path.join(dp, fname)
             rel = os.path.relpath(full, root)
             try:
+                if config.is_secret_path(full):
+                    continue  # never snapshot .env / keys / credentials in cleartext
                 if os.path.getsize(full) > _MAX_FILE:
                     continue
                 out = os.path.join(dest, rel)
@@ -68,10 +70,17 @@ def restore_checkpoint(ckpt_id: int) -> dict:
     if not os.path.isfile(mf):
         raise FileNotFoundError(f"Checkpoint {ckpt_id} no encontrado")
     manifest = json.load(open(mf, encoding="utf-8"))
+    root_real = os.path.realpath(root)
     restored: list[str] = []
     for rel in manifest["files"]:
         s = os.path.join(src, rel)
         d = os.path.join(root, rel)
+        # Guard against a tampered manifest with '..' escaping the workspace.
+        try:
+            if os.path.commonpath([root_real, os.path.realpath(d)]) != root_real:
+                continue
+        except ValueError:
+            continue
         if os.path.isfile(s):
             os.makedirs(os.path.dirname(d) or ".", exist_ok=True)
             shutil.copy2(s, d)

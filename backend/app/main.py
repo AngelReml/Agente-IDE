@@ -36,12 +36,16 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Swarm IDE API", version="4.0.0")
 
+_cors_origins = config.cors_origins()
+# Never combine credentials with a wildcard origin (browsers reject it AND it is a
+# CSRF footgun). If the operator set "*", disable credentials.
+_cors_credentials = "*" not in _cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=config.cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=_cors_credentials,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
 )
 
 
@@ -50,21 +54,35 @@ def _startup() -> None:
     store.init()
     ok, msg = sandbox.preflight()
     logger.info("Sandbox preflight: %s%s", msg, "" if ok else "  ⚠️")
-    if not config.is_loopback_only() and config.auth_token() is None:
-        logger.warning("⚠️  SWARM_HOST no es loopback y SWARM_AUTH_TOKEN no está definido. "
-                       "Los endpoints de escritura/ejecución quedarán BLOQUEADOS hasta que definas un token.")
+    if not config.is_loopback_only():
+        # Exposed to the network: refuse the dangerous combinations rather than
+        # degrade silently. The agent can run arbitrary commands, so an exposed
+        # server with the no-isolation local sandbox is remote code execution.
+        if config.sandbox_mode() == "local" and os.getenv("SWARM_ALLOW_INSECURE_LOCAL_SANDBOX") != "1":
+            raise RuntimeError(
+                "SWARM_HOST no es loopback con SWARM_SANDBOX=local: el agente ejecutaría "
+                "comandos sin aislamiento en el host (RCE). Usa SWARM_SANDBOX=docker, o "
+                "fija SWARM_ALLOW_INSECURE_LOCAL_SANDBOX=1 si asumes el riesgo conscientemente.")
+        if config.auth_token() is None:
+            logger.warning("⚠️  SWARM_HOST no es loopback y SWARM_AUTH_TOKEN no está definido. "
+                           "Los endpoints de escritura/ejecución quedarán BLOQUEADOS hasta que definas un token.")
 
 
 @app.middleware("http")
 async def _request_id_mw(request: Request, call_next):
     rid = request.headers.get("x-request-id") or metrics.new_request_id()
-    metrics.M.inc("swarm_http_requests_total", path=request.url.path.split("?")[0])
     response = await call_next(request)
     response.headers["X-Request-ID"] = rid
+    # Label by the ROUTE TEMPLATE (e.g. /api/runs/{run_id}/events), never the raw
+    # URL — otherwise every run_id/ckpt_id would create a new metric series (an
+    # unbounded-cardinality memory leak, remotely inducible).
+    route = request.scope.get("route")
+    path_label = getattr(route, "path", None) or "other"
+    metrics.M.inc("swarm_http_requests_total", path=path_label)
     return response
 
 
-@app.get("/metrics", response_class=PlainTextResponse)
+@app.get("/metrics", response_class=PlainTextResponse, dependencies=[Depends(require_auth)])
 def get_metrics():
     s = cost_tracker.session_stats()
     metrics.M.set_gauge("swarm_session_cost_usd", s["cost_usd"])
@@ -181,11 +199,13 @@ def _build_tree(full: str, rel: str = ".", depth: int = 0, max_depth: int = conf
     children = []
     try:
         for entry in sorted(os.listdir(full)):
-            if entry in SKIP_DIRS or entry in SECRET_FILES:
+            if entry in SKIP_DIRS:
+                continue
+            ef = os.path.join(full, entry)
+            if config.is_secret_path(ef):
                 continue
             if entry.startswith(".") and entry not in {".gitignore", ".dockerignore", ".env.example"}:
                 continue
-            ef = os.path.join(full, entry)
             er = (rel.rstrip("/") + "/" + entry).lstrip("./")
             child = _build_tree(ef, er, depth + 1, max_depth)
             if child:
@@ -195,20 +215,20 @@ def _build_tree(full: str, rel: str = ".", depth: int = 0, max_depth: int = conf
     return {"name": name, "type": "directory", "path": rel, "children": children}
 
 
-@app.get("/api/files")
+@app.get("/api/files", dependencies=[Depends(require_auth)])
 def get_files():
     ensure_project()
     return _build_tree(project_root(), ".")
 
 
-@app.get("/api/file")
+@app.get("/api/file", dependencies=[Depends(require_auth)])
 def get_file(path: str = Query(..., max_length=500)):
     ensure_project()
     try:
         full = _resolve_api_path(path)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    if os.path.basename(full) in SECRET_FILES:
+    if config.is_secret_path(full):
         raise HTTPException(403, "Archivo de secretos protegido")
     if not os.path.exists(full):
         raise HTTPException(404, f"Not found: {path}")
@@ -220,7 +240,17 @@ def get_file(path: str = Query(..., max_length=500)):
         with open(full, "r", encoding="utf-8", errors="replace") as f:
             return {"path": path, "content": f.read()}
     except Exception as exc:
-        raise HTTPException(500, str(exc))
+        logger.exception("get_file failed for %s", path)
+        raise HTTPException(500, "No se pudo leer el archivo")
+
+
+_PROTECTED_WRITE_DIRS = (".git", ".github", ".swarm")
+
+
+def _is_protected_write(full: str) -> bool:
+    rel = os.path.relpath(full, project_root()).replace("\\", "/")
+    first = rel.split("/", 1)[0]
+    return first in _PROTECTED_WRITE_DIRS
 
 
 @app.post("/api/file", dependencies=[Depends(require_auth)])
@@ -230,11 +260,17 @@ def post_file(req: FileWriteRequest):
         full = _resolve_api_path(req.path)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    if os.path.basename(full) in SECRET_FILES:
+    if config.is_secret_path(full):
         raise HTTPException(403, "Archivo de secretos protegido")
-    os.makedirs(os.path.dirname(full), exist_ok=True)
-    with open(full, "w", encoding="utf-8") as f:
-        f.write(req.content)
+    if _is_protected_write(full):
+        # Block writes to .git (e.g. hooks → deferred RCE), .github/workflows and .swarm.
+        raise HTTPException(403, "Escritura denegada en directorio protegido (.git/.github/.swarm)")
+    # Atomic, backed-up write (was a raw truncating open that could corrupt on crash).
+    try:
+        safe_fs.write_file_safe(req.path, req.content, overwrite_external=False)
+    except Exception as exc:
+        logger.exception("post_file failed for %s", req.path)
+        raise HTTPException(500, "No se pudo escribir el archivo")
     return {"status": "ok", "path": req.path}
 
 
@@ -242,15 +278,16 @@ def post_file(req: FileWriteRequest):
 def delete_file_endpoint(path: str = Query(..., max_length=500)):
     ensure_project()
     try:
-        full = _resolve_api_path(path)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    if not os.path.exists(full):
+        # delete_file_safe validates the path AND backs files up before removal,
+        # so a deletion is recoverable (was a raw irreversible rmtree).
+        _resolved, _is_dir = safe_fs.delete_file_safe(path, confirmed_external=False)
+    except ValueError:
+        raise HTTPException(400, "Ruta fuera del workspace")
+    except FileNotFoundError:
         raise HTTPException(404, f"Not found: {path}")
-    if os.path.isfile(full):
-        os.remove(full)
-    else:
-        shutil.rmtree(full)
+    except Exception:
+        logger.exception("delete_file failed for %s", path)
+        raise HTTPException(500, "No se pudo eliminar")
     return {"status": "ok", "path": path}
 
 
@@ -265,26 +302,27 @@ def _git(*args: str) -> str:
         return str(exc)
 
 
-@app.get("/api/git/status")
+@app.get("/api/git/status", dependencies=[Depends(require_auth)])
 def git_status():
     ensure_project()
     return {"status": _git("status", "--short") or "clean",
             "branch": _git("branch", "--show-current") or "main"}
 
 
-@app.get("/api/git/diff")
+@app.get("/api/git/diff", dependencies=[Depends(require_auth)])
 def git_diff_endpoint(path: str = Query(default="")):
     ensure_project()
     args = ["diff"]
     if path:
         try:
-            args.append(os.path.relpath(safe_fs.resolve_and_validate_path(path, allow_external=True), project_root()))
+            # Confine to the project (was allow_external=True → could diff arbitrary paths).
+            args.append(os.path.relpath(_resolve_api_path(path), project_root()))
         except ValueError:
             raise HTTPException(400, "Invalid path")
     return {"diff": _git(*args)}
 
 
-@app.get("/api/git/log")
+@app.get("/api/git/log", dependencies=[Depends(require_auth)])
 def git_log(n: int = Query(default=20, le=100)):
     ensure_project()
     raw = _git("log", f"-{n}", "--pretty=format:%H%x00%s%x00%an%x00%ar")
@@ -333,7 +371,7 @@ async def select_model(req: ModelSelectRequest):
 
 # ── Chat history ──────────────────────────────────────────────────────────────
 
-@app.get("/api/chat/context")
+@app.get("/api/chat/context", dependencies=[Depends(require_auth)])
 def get_chat_context():
     return {"messages": session_message_count()}
 
@@ -346,14 +384,17 @@ def clear_chat_context():
 
 # ── Backup / Restore ──────────────────────────────────────────────────────────
 
-@app.get("/api/backups")
+@app.get("/api/backups", dependencies=[Depends(require_auth)])
 def list_backups(path: str = Query(..., max_length=500)):
     ensure_project()
     try:
         backups = safe_fs.list_backups(path)
         return {"backups": [{"timestamp": ts, "backup_path": bp} for bp, ts in backups]}
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
+    except ValueError:
+        raise HTTPException(400, "Ruta fuera del workspace")
+    except Exception:
+        logger.exception("list_backups failed for %s", path)
+        raise HTTPException(500, "No se pudieron listar los backups")
 
 
 @app.post("/api/restore", dependencies=[Depends(require_auth)])
@@ -364,13 +405,16 @@ def restore_file(req: RestoreRequest):
         return {"status": "ok", "path": req.path, "timestamp": req.timestamp}
     except FileNotFoundError as exc:
         raise HTTPException(404, str(exc))
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
+    except ValueError:
+        raise HTTPException(400, "Ruta fuera del workspace")
+    except Exception:
+        logger.exception("restore failed for %s", req.path)
+        raise HTTPException(500, "No se pudo restaurar")
 
 
 # ── Checkpoints (Fase 5: time-travel de todo el workspace) ────────────────────
 
-@app.get("/api/checkpoints")
+@app.get("/api/checkpoints", dependencies=[Depends(require_auth)])
 def list_checkpoints():
     ensure_project()
     return {"checkpoints": checkpoints.list_checkpoints()}
@@ -398,8 +442,9 @@ def restore_checkpoint(ckpt_id: int):
 async def diff_summary(req: DiffSummaryRequest):
     try:
         return diff_parser.generate_human_summary(req.path, req.diff)
-    except Exception as exc:
-        raise HTTPException(500, str(exc))
+    except Exception:
+        logger.exception("diff_summary failed")
+        raise HTTPException(500, "No se pudo generar el resumen")
 
 
 # ── Semantic Index ────────────────────────────────────────────────────────────
@@ -412,26 +457,26 @@ def rebuild_index():
 
 # ── Cost tracking ─────────────────────────────────────────────────────────────
 
-@app.get("/api/cost")
+@app.get("/api/cost", dependencies=[Depends(require_auth)])
 def get_cost():
     return {"run": cost_tracker.run_stats(), "session": cost_tracker.session_stats()}
 
 
 # ── Runs (persistence) ────────────────────────────────────────────────────────
 
-@app.get("/api/runs")
+@app.get("/api/runs", dependencies=[Depends(require_auth)])
 def list_runs(session_id: str | None = Query(default=None), limit: int = Query(default=50, le=200)):
     return {"runs": store.list_runs(session_id, limit)}
 
 
-@app.get("/api/runs/{run_id}/events")
+@app.get("/api/runs/{run_id}/events", dependencies=[Depends(require_auth)])
 def get_run_events(run_id: str):
     return {"events": store.get_run_events(run_id)}
 
 
 # ── Plan (agentic task tracking) ──────────────────────────────────────────────
 
-@app.get("/api/plan")
+@app.get("/api/plan", dependencies=[Depends(require_auth)])
 def get_plan():
     p = os.path.join(project_root(), ".swarm", "plan.md")
     if not os.path.exists(p):
@@ -468,9 +513,15 @@ def whoami(principal: auth.Principal = Depends(auth.get_principal)):
 
 # ── Project workspace ─────────────────────────────────────────────────────────
 
-@app.get("/api/project")
+@app.get("/api/project", dependencies=[Depends(require_auth)])
 def get_project():
     return {"path": project_root()}
+
+
+def _projects_base() -> Path | None:
+    """Optional confinement dir for project switching (multi-tenant safety)."""
+    base = os.getenv("SWARM_PROJECTS_DIR", "").strip()
+    return Path(base).resolve() if base else None
 
 
 @app.post("/api/project/switch", dependencies=[Depends(require_auth)])
@@ -481,6 +532,16 @@ def switch_project(req: ProjectSwitchRequest):
         raise HTTPException(400, f"Path does not exist: {req.path}")
     if not new_path.is_dir():
         raise HTTPException(400, f"Path is not a directory: {req.path}")
+
+    # If a confinement dir is configured, the new root must live under it (so a
+    # token holder can't repoint PROJECT_ROOT at C:\Users and read everything).
+    base = _projects_base()
+    if base is not None:
+        try:
+            if os.path.commonpath([base, new_path.resolve()]) != str(base):
+                raise HTTPException(403, "Ruta fuera del directorio de proyectos permitido")
+        except ValueError:
+            raise HTTPException(403, "Ruta fuera del directorio de proyectos permitido")
 
     normalized = str(new_path).replace("\\", "/")
     env_file = config.env_file()
@@ -496,8 +557,9 @@ def switch_project(req: ProjectSwitchRequest):
         if not found:
             out.append(f"PROJECT_ROOT={normalized}")
         env_file.write_text("\n".join(out) + "\n", encoding="utf-8")
-    except Exception as exc:
-        raise HTTPException(500, f"Could not update .env: {exc}")
+    except Exception:
+        logger.exception("switch_project failed to update .env")
+        raise HTTPException(500, "No se pudo actualizar la configuración del proyecto")
 
     # Apply live — config.project_root() reads env at runtime, so this is hot.
     os.environ["PROJECT_ROOT"] = normalized
@@ -505,7 +567,7 @@ def switch_project(req: ProjectSwitchRequest):
     return {"status": "ok", "path": normalized, "note": "Aplicado en caliente"}
 
 
-@app.get("/api/project/recents")
+@app.get("/api/project/recents", dependencies=[Depends(require_auth)])
 def list_recent_projects():
     try:
         parent = Path(project_root()).parent
