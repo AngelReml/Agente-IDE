@@ -157,6 +157,16 @@ def test_worker_job_publishes_and_persists():
     assert store.finished == ("rid", "done", "openai", "gpt")
 
 
+def test_worker_settings_redis_is_an_attribute_not_a_method():
+    # Regression: arq reads WorkerSettings.redis_settings as a RedisSettings
+    # ATTRIBUTE; a @staticmethod made arq crash on boot with
+    # "'staticmethod' object has no attribute 'host'".
+    import pytest
+    RedisSettings = pytest.importorskip("arq.connections").RedisSettings
+    assert isinstance(worker.WorkerSettings.redis_settings, RedisSettings)
+    assert not callable(worker.WorkerSettings.redis_settings)
+
+
 def test_worker_job_reports_agent_failure():
     bus = runbus.InProcessBus()
     store = _FakeStore()

@@ -53,10 +53,17 @@ async def run_swarm_job(ctx, task: str, session_id: str = "default",
     return {"run_id": run_id, "status": status}
 
 
-class WorkerSettings:  # pragma: no cover - requires arq runtime
-    functions = [run_swarm_job]
+def _worker_redis_settings():
+    from arq.connections import RedisSettings
+    return RedisSettings.from_dsn(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
-    @staticmethod
-    def redis_settings():
-        from arq.connections import RedisSettings
-        return RedisSettings.from_dsn(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
+
+class WorkerSettings:  # used only by `arq app.worker.WorkerSettings`
+    functions = [run_swarm_job]
+    # arq reads `redis_settings` as a RedisSettings ATTRIBUTE, not a method — a
+    # @staticmethod here makes arq do `staticmethod.host` and crash on boot. Built
+    # lazily so importing this module (in CI/tests) never requires arq installed.
+    try:
+        redis_settings = _worker_redis_settings()
+    except Exception:  # pragma: no cover - arq absent: the worker is never run in CI
+        redis_settings = None
