@@ -22,6 +22,46 @@ def test_docker_args_are_hardened(monkeypatch):
     assert args[-3:] == ["python", "-c", "print(1)"]  # command appended last
 
 
+def test_docker_runtime_flag_is_opt_in(monkeypatch):
+    # Default: no --runtime (plain runc), unchanged behaviour.
+    monkeypatch.delenv("SWARM_SANDBOX_RUNTIME", raising=False)
+    args = sandbox.DockerBackend().build_args(["sh", "-c", "echo hi"], "/work/ws")
+    assert "--runtime" not in args
+
+    # Flag set → hardened runtime injected right after `docker run --rm`.
+    monkeypatch.setenv("SWARM_SANDBOX_RUNTIME", "runsc")
+    args = sandbox.DockerBackend().build_args(["sh", "-c", "echo hi"], "/work/ws")
+    i = args.index("--runtime")
+    assert args[i + 1] == "runsc"
+    assert args[:i] == ["docker", "run", "--rm"]   # before the rest of the hardening
+
+
+def test_docker_available_uses_version_not_info(monkeypatch):
+    # `docker info` is denied by a socket-proxy allowlist; `docker version` (/version)
+    # is allowed. Ensure preflight probes with `version` so it works behind the proxy.
+    sandbox.docker_available.cache_clear()
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/usr/bin/docker")
+    calls = []
+
+    class _R:
+        returncode = 0
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return _R()
+
+    monkeypatch.setattr(sandbox.subprocess, "run", fake_run)
+    assert sandbox.docker_available() is True
+    sandbox.docker_available.cache_clear()
+    assert calls and calls[0][:2] == ["docker", "version"]
+
+
+def test_preflight_local_unaffected(monkeypatch):
+    monkeypatch.setenv("SWARM_SANDBOX", "local")
+    ok, msg = sandbox.preflight()
+    assert ok and msg == "sandbox=local"
+
+
 # ── Fase 2: in-process job queue ────────────────────────────────────────────────
 
 def test_inprocess_queue_runs_job():

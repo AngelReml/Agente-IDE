@@ -33,6 +33,28 @@ services:
       timeout: 3s
       retries: 10
 
+  # Socket-proxy con allowlist (Fase 5). Es el ÚNICO servicio que toca el socket
+  # crudo del daemon; la API habla con él por TCP y nunca con /var/run/docker.sock.
+  # Solo se permiten los endpoints que DockerBackend usa para contenedores efímeros:
+  #   - CONTAINERS=1  → crear / inspeccionar / esperar / logs / borrar (--rm)
+  #   - IMAGES=1      → `docker image inspect` del preflight
+  #   - ALLOW_START=1 → `containers/{id}/start`
+  #   - POST=1        → habilita métodos de escritura (POST/PUT/DELETE); sin él
+  #                     todo sería de solo lectura. Cubre el DELETE de `--rm`.
+  # Lo demás (EXEC, VOLUMES, NETWORKS, SWARM, host binds…) queda DENEGADO por defecto.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      ALLOW_START: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    # Solo accesible dentro de la red del compose; nunca publicado al host.
+    expose: ["2375"]
+    restart: unless-stopped
+
   api:
     build:
       context: ./backend
@@ -44,17 +66,17 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-swarm}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-swarm}
       REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
       SWARM_SANDBOX: docker
+      # La API NO monta el socket: habla con el daemon solo a través del proxy
+      # con allowlist. El cliente `docker` lee DOCKER_HOST del entorno.
+      DOCKER_HOST: tcp://docker-proxy:2375
+      # Runtime endurecido opcional (gVisor) para aislamiento multi-tenant fuerte.
+      # Vacío = runc por defecto. Requiere el runtime instalado en el host del daemon.
+      SWARM_SANDBOX_RUNTIME: ${SWARM_SANDBOX_RUNTIME:-}
     ports: ["127.0.0.1:8000:8000"]
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
-    # El ejecutor docker del agente necesita hablar con el daemon. Montar el socket
-    # crudo da control TOTAL del host (escape de contenedor → root). En producción
-    # usa un socket-proxy con allowlist (p.ej. tecnativa/docker-socket-proxy) o un
-    # runtime rootless (sysbox/gVisor). Aquí lo montamos en SOLO LECTURA como
-    # mitigación parcial; revísalo antes de exponer este stack.
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      docker-proxy: { condition: service_started }
 
 volumes:
   pgdata:

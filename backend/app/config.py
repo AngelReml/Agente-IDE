@@ -159,6 +159,18 @@ def sandbox_memory() -> str:
     return os.getenv("SWARM_SANDBOX_MEMORY", "1g")
 
 
+def sandbox_runtime() -> str:
+    """Container runtime: '' (default runc) or a hardened one like 'runsc' (gVisor)
+    / 'kata-runtime' for stronger multi-tenant isolation (Fase 6)."""
+    return os.getenv("SWARM_SANDBOX_RUNTIME", "")
+
+
+def docker_host() -> str:
+    """Docker endpoint the CLI talks to. In production set this to a socket-proxy
+    (tcp://docker-proxy:2375) so the API never touches the raw daemon socket."""
+    return os.getenv("DOCKER_HOST", "")
+
+
 # ── Persistence backend (Fase 2) ────────────────────────────────────────────────
 
 def db_backend() -> str:

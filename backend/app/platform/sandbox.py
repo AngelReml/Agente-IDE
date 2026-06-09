@@ -50,8 +50,12 @@ class DockerBackend:
 
     def build_args(self, args: list[str], cwd: str, env: dict | None = None) -> list[str]:
         """Pure construction of the `docker run` argv (unit-tested for hardening)."""
-        docker_args = [
-            "docker", "run", "--rm",
+        docker_args = ["docker", "run", "--rm"]
+        runtime = config.sandbox_runtime()
+        if runtime:
+            # Hardened runtime (gVisor 'runsc', Kata…) for stronger isolation.
+            docker_args += ["--runtime", runtime]
+        docker_args += [
             "--network", config.sandbox_network(),   # 'none' by default → no egress
             "--memory", config.sandbox_memory(),
             "--pids-limit", "256",
@@ -97,7 +101,9 @@ def preflight() -> tuple[bool, str]:
             return False, f"sandbox=docker: imagen '{img}' no encontrada (make sandbox-image)"
     except Exception as e:  # pragma: no cover
         return False, f"sandbox=docker: error {e}"
-    return True, f"sandbox=docker img={img}"
+    via = f" via {config.docker_host()}" if config.docker_host() else ""
+    rt = f" runtime={config.sandbox_runtime()}" if config.sandbox_runtime() else ""
+    return True, f"sandbox=docker img={img}{rt}{via}"
 
 
 @lru_cache(maxsize=1)
@@ -105,7 +111,9 @@ def docker_available() -> bool:
     if not shutil.which("docker"):
         return False
     try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=5)
+        # `docker version` hits /version, which a socket-proxy allows by default
+        # (unlike `docker info`); returns non-zero if the daemon is unreachable.
+        r = subprocess.run(["docker", "version"], capture_output=True, timeout=5)
         return r.returncode == 0
     except Exception:
         return False
