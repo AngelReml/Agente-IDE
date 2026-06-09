@@ -3,7 +3,6 @@ and PgVectorStore (Postgres/pgvector). The pgvector SQL is exercised against a f
 psycopg-style connection, so no live database is required."""
 from app import retrieval
 
-
 # ── A fake psycopg3 connection: records executed SQL + params, returns canned rows ──
 
 class _FakeCursor:

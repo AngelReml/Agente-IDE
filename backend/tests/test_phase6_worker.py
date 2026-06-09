@@ -11,7 +11,6 @@ import asyncio
 from app import runbus, worker
 from app.runmanager import RunManager
 
-
 # ── InProcessBus: ordered log with replay + live tail ────────────────────────────
 
 def test_bus_replays_backlog_then_ends():
