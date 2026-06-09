@@ -152,6 +152,19 @@ class TenancyDB:
             pids=r["pids"] or base.pids,
         )
 
+    def limits_for_root(self, root_path: str):
+        """Resolve sandbox limits for the workspace whose root_path matches `root_path`
+        (the active PROJECT_ROOT). Falls back to config defaults if no workspace owns
+        that root — so the single-user/local path keeps the process-wide quota."""
+        from .platform.sandbox import ResourceLimits
+        target = os.path.realpath(root_path)
+        with self._lock, self._conn() as c:
+            rows = c.execute("SELECT id, root_path FROM workspaces").fetchall()
+        for r in rows:
+            if os.path.realpath(r["root_path"]) == target:
+                return self.limits_for(r["id"])
+        return ResourceLimits.from_config()
+
     # ── Audit ──
     def audit(self, user_id: str, workspace_id: str, action: str, detail: str = "") -> None:
         with self._lock, self._conn() as c:
@@ -173,3 +186,8 @@ def db() -> TenancyDB:
     if _default is None:
         _default = TenancyDB()
     return _default
+
+
+def limits_for_root(root_path: str):
+    """Module-level convenience: sandbox limits for the workspace at `root_path`."""
+    return db().limits_for_root(root_path)

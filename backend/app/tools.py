@@ -415,7 +415,17 @@ def run_command(command: str, timeout: int = 120) -> str:
     # when SWARM_SANDBOX=docker/auto). The backend resolves the executable.
     from .platform import sandbox
     backend = sandbox.get_backend()
-    res = backend.run(args, cwd=root, timeout=timeout)
+    # Per-workspace resource caps only matter (and are only enforceable) under the
+    # docker backend; the lookup is skipped for local so the single-user path needs
+    # no tenancy DB.
+    limits = None
+    if getattr(backend, "name", "local") == "docker":
+        try:
+            from . import tenancy
+            limits = tenancy.limits_for_root(root)
+        except Exception:  # tenancy unavailable → fall back to config defaults
+            limits = None
+    res = backend.run(args, cwd=root, timeout=timeout, limits=limits)
     out, err = res.stdout, res.stderr
     if res.returncode == 127 and "no encontrado" in err:
         return f"❌ {err.strip()}\nTip: usa 'python -m {cmd_name}' o instala con pip."

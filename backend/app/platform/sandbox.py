@@ -42,7 +42,10 @@ class ResourceLimits:
 class LocalBackend:
     name = "local"
 
-    def run(self, args: list[str], cwd: str, timeout: int, env: dict | None = None) -> ExecResult:
+    def run(self, args: list[str], cwd: str, timeout: int, env: dict | None = None,
+            limits: "ResourceLimits | None" = None) -> ExecResult:
+        # `limits` is accepted for a uniform backend interface but ignored: a host
+        # subprocess has no cgroup quota. Resource caps only apply to DockerBackend.
         exe = shutil.which(args[0]) or shutil.which(os.path.basename(args[0]))
         if exe:
             args = [exe] + args[1:]

@@ -122,6 +122,28 @@ def test_tenancy_resource_limits(tmp_path):
     assert base.cpus == "2" and base.memory == "1g" and base.pids == "256"
 
 
+def test_tenancy_limits_for_root(tmp_path):
+    db = tenancy.TenancyDB(str(tmp_path / "t.db"))
+    owner = db.create_user("alice")
+    ws_root = str(tmp_path / "proj")
+    db.create_workspace("p", ws_root, owner, limits={"cpus": "0.5", "memory": "256m"})
+    # Active PROJECT_ROOT matching a workspace root → that workspace's caps.
+    lim = db.limits_for_root(ws_root)
+    assert lim.cpus == "0.5" and lim.memory == "256m" and lim.pids == "256"
+    # A root owned by no workspace → process/config defaults (local single-user path).
+    other = db.limits_for_root(str(tmp_path / "elsewhere"))
+    assert other.cpus == "2" and other.memory == "1g"
+
+
+def test_local_backend_ignores_limits(tmp_path):
+    import sys
+    # LocalBackend accepts limits for a uniform interface but must run regardless.
+    lim = sandbox.ResourceLimits(cpus="0.1", memory="64m", pids="8")
+    res = sandbox.LocalBackend().run([sys.executable, "-c", "print('ok')"],
+                                     cwd=str(tmp_path), timeout=30, limits=lim)
+    assert res.returncode == 0 and "ok" in res.stdout
+
+
 def test_tenancy_budget(tmp_path):
     db = tenancy.TenancyDB(str(tmp_path / "t.db"))
     owner = db.create_user("alice")
