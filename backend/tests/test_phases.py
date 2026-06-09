@@ -62,6 +62,23 @@ def test_preflight_local_unaffected(monkeypatch):
     assert ok and msg == "sandbox=local"
 
 
+def test_sandbox_resource_limits_default_matches_config(monkeypatch):
+    # Default limits reproduce the historic hardcoded quota exactly (no regression).
+    for v in ("SWARM_SANDBOX_CPUS", "SWARM_SANDBOX_PIDS", "SWARM_SANDBOX_MEMORY"):
+        monkeypatch.delenv(v, raising=False)
+    args = sandbox.DockerBackend().build_args(["sh"], "/ws")
+    joined = " ".join(args)
+    assert "--memory 1g" in joined and "--pids-limit 256" in joined and "--cpus 2" in joined
+
+
+def test_sandbox_per_workspace_limits_override(monkeypatch):
+    # An explicit ResourceLimits (e.g. from tenancy.limits_for) wins over config.
+    limits = sandbox.ResourceLimits(cpus="0.5", memory="512m", pids="64")
+    args = sandbox.DockerBackend().build_args(["sh"], "/ws", limits=limits)
+    joined = " ".join(args)
+    assert "--cpus 0.5" in joined and "--memory 512m" in joined and "--pids-limit 64" in joined
+
+
 # ── Fase 2: in-process job queue ────────────────────────────────────────────────
 
 def test_inprocess_queue_runs_job():
@@ -90,6 +107,19 @@ def test_tenancy_users_workspaces_roles(tmp_path):
     db.add_member(member, ws, "editor")
     assert db.role_of(member, ws) == "editor"
     assert any(w["id"] == ws for w in db.workspaces_for(member))
+
+
+def test_tenancy_resource_limits(tmp_path):
+    db = tenancy.TenancyDB(str(tmp_path / "t.db"))
+    owner = db.create_user("alice")
+    # Workspace with a custom cpu/pid cap but no memory override.
+    ws = db.create_workspace("p", str(tmp_path), owner, limits={"cpus": "1", "pids": "64"})
+    lim = db.limits_for(ws)
+    assert lim.cpus == "1" and lim.pids == "64"
+    assert lim.memory == "1g"          # NULL column → config default
+    # Unknown workspace → all config defaults.
+    base = db.limits_for("ghost")
+    assert base.cpus == "2" and base.memory == "1g" and base.pids == "256"
 
 
 def test_tenancy_budget(tmp_path):

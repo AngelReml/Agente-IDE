@@ -59,6 +59,12 @@ class TenancyDB:
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL,
                 user_id TEXT, workspace_id TEXT, action TEXT, detail TEXT);
             """)
+            # Additive migration: per-workspace sandbox resource quotas (Fase 6).
+            # NULL means "use the process/config default" — old rows keep working.
+            have = {r["name"] for r in c.execute("PRAGMA table_info(workspaces)")}
+            for col in ("cpus", "memory", "pids"):
+                if col not in have:
+                    c.execute(f"ALTER TABLE workspaces ADD COLUMN {col} TEXT")
 
     # ── Users ──
     def create_user(self, name: str) -> str:
@@ -73,11 +79,15 @@ class TenancyDB:
             return dict(r) if r else None
 
     # ── Workspaces ──
-    def create_workspace(self, name: str, root_path: str, owner_id: str, budget_usd: float = 0.0) -> str:
+    def create_workspace(self, name: str, root_path: str, owner_id: str, budget_usd: float = 0.0,
+                         limits: dict | None = None) -> str:
         wid = uuid.uuid4().hex[:12]
+        lim = limits or {}
         with self._lock, self._conn() as c:
-            c.execute("INSERT INTO workspaces (id, name, root_path, owner_id, budget_usd) VALUES (?,?,?,?,?)",
-                      (wid, name, root_path, owner_id, budget_usd))
+            c.execute("INSERT INTO workspaces (id, name, root_path, owner_id, budget_usd, cpus, memory, pids) "
+                      "VALUES (?,?,?,?,?,?,?,?)",
+                      (wid, name, root_path, owner_id, budget_usd,
+                       lim.get("cpus"), lim.get("memory"), lim.get("pids")))
             c.execute("INSERT OR REPLACE INTO memberships (user_id, workspace_id, role) VALUES (?,?, 'owner')",
                       (owner_id, wid))
         return wid
@@ -126,6 +136,21 @@ class TenancyDB:
         remaining = (budget - used) if budget > 0 else float("inf")
         return {"budget": budget, "used": round(used, 6), "remaining": remaining,
                 "ok": budget <= 0 or used < budget}
+
+    def limits_for(self, workspace_id: str):
+        """Sandbox resource limits for a workspace, falling back to config defaults
+        for any column left NULL. Returns a sandbox.ResourceLimits."""
+        from .platform.sandbox import ResourceLimits
+        base = ResourceLimits.from_config()
+        with self._lock, self._conn() as c:
+            r = c.execute("SELECT cpus, memory, pids FROM workspaces WHERE id=?", (workspace_id,)).fetchone()
+        if not r:
+            return base
+        return ResourceLimits(
+            cpus=r["cpus"] or base.cpus,
+            memory=r["memory"] or base.memory,
+            pids=r["pids"] or base.pids,
+        )
 
     # ── Audit ──
     def audit(self, user_id: str, workspace_id: str, action: str, detail: str = "") -> None:

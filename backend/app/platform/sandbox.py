@@ -25,6 +25,20 @@ class ExecResult:
     stderr: str
 
 
+@dataclass
+class ResourceLimits:
+    """Per-sandbox resource quota (CPU/mem/pids). Defaults come from config; the
+    multi-tenant path overrides them per workspace via `tenancy.limits_for()`."""
+    cpus: str
+    memory: str
+    pids: str
+
+    @classmethod
+    def from_config(cls) -> "ResourceLimits":
+        return cls(cpus=config.sandbox_cpus(), memory=config.sandbox_memory(),
+                   pids=config.sandbox_pids())
+
+
 class LocalBackend:
     name = "local"
 
@@ -48,8 +62,10 @@ class LocalBackend:
 class DockerBackend:
     name = "docker"
 
-    def build_args(self, args: list[str], cwd: str, env: dict | None = None) -> list[str]:
+    def build_args(self, args: list[str], cwd: str, env: dict | None = None,
+                   limits: "ResourceLimits | None" = None) -> list[str]:
         """Pure construction of the `docker run` argv (unit-tested for hardening)."""
+        limits = limits or ResourceLimits.from_config()
         docker_args = ["docker", "run", "--rm"]
         runtime = config.sandbox_runtime()
         if runtime:
@@ -57,9 +73,9 @@ class DockerBackend:
             docker_args += ["--runtime", runtime]
         docker_args += [
             "--network", config.sandbox_network(),   # 'none' by default → no egress
-            "--memory", config.sandbox_memory(),
-            "--pids-limit", "256",
-            "--cpus", "2",
+            "--memory", limits.memory,
+            "--pids-limit", limits.pids,
+            "--cpus", limits.cpus,
             "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--read-only",                            # rootfs read-only; only /workspace is writable
@@ -75,8 +91,9 @@ class DockerBackend:
         docker_args += args  # original command name; resolved inside the image
         return docker_args
 
-    def run(self, args: list[str], cwd: str, timeout: int, env: dict | None = None) -> ExecResult:
-        docker_args = self.build_args(args, cwd, env)
+    def run(self, args: list[str], cwd: str, timeout: int, env: dict | None = None,
+            limits: "ResourceLimits | None" = None) -> ExecResult:
+        docker_args = self.build_args(args, cwd, env, limits)
         try:
             r = subprocess.run(docker_args, shell=False, capture_output=True, text=True, timeout=timeout)
             return ExecResult(r.returncode, r.stdout or "", r.stderr or "")

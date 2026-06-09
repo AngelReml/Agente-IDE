@@ -159,6 +159,16 @@ def sandbox_memory() -> str:
     return os.getenv("SWARM_SANDBOX_MEMORY", "1g")
 
 
+def sandbox_cpus() -> str:
+    """CPU quota per sandbox container (Docker --cpus). Default 2 cores."""
+    return os.getenv("SWARM_SANDBOX_CPUS", "2")
+
+
+def sandbox_pids() -> str:
+    """Max processes per sandbox container (Docker --pids-limit). Default 256."""
+    return os.getenv("SWARM_SANDBOX_PIDS", "256")
+
+
 def sandbox_runtime() -> str:
     """Container runtime: '' (default runc) or a hardened one like 'runsc' (gVisor)
     / 'kata-runtime' for stronger multi-tenant isolation (Fase 6)."""
