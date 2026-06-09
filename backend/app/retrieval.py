@@ -237,10 +237,20 @@ class PgVectorStore:
         self._conn = conn
         self._ready = False
 
+    @staticmethod
+    def _libpq_dsn(dsn: str) -> str:
+        """Strip the SQLAlchemy driver suffix: persistence shares DATABASE_URL as
+        `postgresql+psycopg://…`, but psycopg.connect() speaks raw libpq and rejects
+        the `+psycopg` part. Without this, pgvector silently falls back to memory."""
+        for prefix in ("postgresql+psycopg://", "postgresql+psycopg2://", "postgres+psycopg://"):
+            if dsn.startswith(prefix):
+                return "postgresql://" + dsn[len(prefix):]
+        return dsn
+
     def _connection(self):
         if self._conn is None:
             import psycopg
-            self._conn = psycopg.connect(self._dsn)
+            self._conn = psycopg.connect(self._libpq_dsn(self._dsn))
         return self._conn
 
     @staticmethod
@@ -312,7 +322,7 @@ def make_vector_store(namespace: str = "default") -> VectorStore:
             store = PgVectorStore(namespace=namespace)
             store._ensure()  # connect + create extension/table now; failure → fallback
             return store
-        except Exception as e:  # pragma: no cover - exercised only with a real DB
+        except Exception as e:
             logger.warning("PgVectorStore no disponible (%s); usando memoria.", e)
     return MemoryVectorStore()
 

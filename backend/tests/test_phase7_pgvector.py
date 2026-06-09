@@ -63,6 +63,15 @@ def test_pgvector_falls_back_when_connection_fails(monkeypatch):
 
 # ── MemoryVectorStore ──────────────────────────────────────────────────────────
 
+def test_pgvector_dsn_strips_sqlalchemy_driver_suffix():
+    # persistence shares DATABASE_URL as postgresql+psycopg://…; psycopg.connect
+    # needs a raw libpq URI. Without normalisation pgvector dies silently → memory.
+    f = retrieval.PgVectorStore._libpq_dsn
+    assert f("postgresql+psycopg://u:p@h:5432/db") == "postgresql://u:p@h:5432/db"
+    assert f("postgresql+psycopg2://u:p@h/db") == "postgresql://u:p@h/db"
+    assert f("postgresql://u:p@h/db") == "postgresql://u:p@h/db"  # already raw, untouched
+
+
 def test_memory_store_ranks_by_cosine():
     store = retrieval.MemoryVectorStore()
     store.add([("a.py", 1, "alpha", [1.0, 0.0]), ("b.py", 2, "beta", [0.0, 1.0])])
