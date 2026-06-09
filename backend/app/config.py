@@ -132,6 +132,19 @@ def embedding_model() -> str:
     return os.getenv("SWARM_EMBED_MODEL", "text-embedding-3-small")
 
 
+def embedding_dim() -> int:
+    """Vector dimension of the embedding model (text-embedding-3-small = 1536).
+    Must match the model; only used to size the pgvector column."""
+    return int(os.getenv("SWARM_EMBED_DIM", "1536"))
+
+
+def vector_store() -> str:
+    """Where embedding vectors live: 'memory' (default, local, in-process cosine)
+    or 'pgvector' (platform, persisted in the existing Postgres). Falls back to
+    memory if pgvector/Postgres is unavailable, so the flag is always safe."""
+    return os.getenv("SWARM_VECTOR_STORE", "memory").lower()
+
+
 # ── SSRF guard ──────────────────────────────────────────────────────────────────
 # fetch_url refuses these unless SWARM_ALLOW_PRIVATE_FETCH=1.
 

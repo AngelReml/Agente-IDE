@@ -185,6 +185,138 @@ class _EmbedCache:
             logger.debug("could not persist embedding cache", exc_info=True)
 
 
+# ── Vector stores: where chunk embeddings live (Fase 7) ─────────────────────────
+
+class VectorStore(Protocol):
+    """Pluggable storage+search for chunk vectors. MemoryVectorStore (local) keeps
+    them in-process; PgVectorStore (platform) persists them in Postgres/pgvector."""
+
+    def add(self, items: list[tuple[str, int, str, list[float]]]) -> None: ...
+    def search(self, qvec: list[float], k: int) -> list[Hit]: ...
+
+
+class MemoryVectorStore:
+    """In-process store: a list of vectors ranked by cosine. Fine up to ~10⁴ chunks
+    and needs no infra — the default for the local/single-user path."""
+
+    name = "memory"
+
+    def __init__(self) -> None:
+        self._chunks: list[Chunk] = []
+        self._vecs: list[list[float]] = []
+
+    def add(self, items: list[tuple[str, int, str, list[float]]]) -> None:
+        for path, start_line, text, vec in items:
+            self._chunks.append(Chunk(path, start_line, text))
+            self._vecs.append(vec)
+
+    def search(self, qvec: list[float], k: int) -> list[Hit]:
+        scored: list[Hit] = []
+        for chunk, v in zip(self._chunks, self._vecs, strict=True):
+            score = _cosine(qvec, v)
+            if score > 0:
+                snippet = "\n".join(chunk.text.splitlines()[:8])
+                scored.append(Hit(chunk.path, chunk.start_line, round(score, 4), snippet))
+        scored.sort(key=lambda h: h.score, reverse=True)
+        return scored[:k]
+
+
+class PgVectorStore:
+    """Persistent store on the existing Postgres via the `pgvector` extension.
+    Scales beyond memory and is shared across API/worker processes. Rows are keyed
+    by `namespace` (one repo/workspace) so several repos coexist in one table.
+    `conn` is injectable for unit tests (no live DB needed)."""
+
+    name = "pgvector"
+
+    def __init__(self, dsn: str | None = None, dim: int | None = None,
+                 namespace: str = "default", conn=None) -> None:
+        self._dsn = dsn or config.database_url()
+        self._dim = dim or config.embedding_dim()
+        self._ns = namespace
+        self._conn = conn
+        self._ready = False
+
+    def _connection(self):
+        if self._conn is None:
+            import psycopg
+            self._conn = psycopg.connect(self._dsn)
+        return self._conn
+
+    @staticmethod
+    def _lit(vec: list[float]) -> str:
+        """pgvector text literal: '[0.1,0.2,…]' (cast with ::vector in SQL)."""
+        return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+    def _ensure(self) -> None:
+        if self._ready:
+            return
+        conn = self._connection()
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS swarm_chunks ("
+                "namespace TEXT, path TEXT, start_line INT, text TEXT, "
+                f"embedding vector({self._dim}))")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS swarm_chunks_emb_idx ON swarm_chunks "
+                "USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)")
+        conn.commit()
+        self._ready = True
+
+    def add(self, items: list[tuple[str, int, str, list[float]]]) -> None:
+        if not items:
+            return
+        self._ensure()
+        conn = self._connection()
+        paths = sorted({p for p, _s, _t, _v in items})
+        with conn.cursor() as cur:
+            # Re-indexing a file replaces its previous chunks (incremental rebuilds).
+            cur.execute("DELETE FROM swarm_chunks WHERE namespace=%s AND path = ANY(%s)",
+                        (self._ns, paths))
+            for path, start_line, text, vec in items:
+                cur.execute(
+                    "INSERT INTO swarm_chunks (namespace, path, start_line, text, embedding) "
+                    "VALUES (%s,%s,%s,%s,%s::vector)",
+                    (self._ns, path, start_line, text, self._lit(vec)))
+        conn.commit()
+
+    def search(self, qvec: list[float], k: int) -> list[Hit]:
+        self._ensure()
+        conn = self._connection()
+        lit = self._lit(qvec)
+        with conn.cursor() as cur:
+            # `<=>` is cosine distance; similarity = 1 - distance (higher is better).
+            cur.execute(
+                "SELECT path, start_line, text, 1 - (embedding <=> %s::vector) AS score "
+                "FROM swarm_chunks WHERE namespace=%s "
+                "ORDER BY embedding <=> %s::vector LIMIT %s",
+                (lit, self._ns, lit, k))
+            rows = cur.fetchall()
+        hits: list[Hit] = []
+        for path, start_line, text, score in rows:
+            snippet = "\n".join((text or "").splitlines()[:8])
+            hits.append(Hit(path, start_line, round(float(score), 4), snippet))
+        return hits
+
+
+def _namespace(root: str) -> str:
+    return hashlib.sha1(os.path.abspath(root).encode("utf-8")).hexdigest()[:16]
+
+
+def make_vector_store(namespace: str = "default") -> VectorStore:
+    """Select the vector store by flag, falling back to memory if pgvector or its
+    Postgres is unavailable — so SWARM_VECTOR_STORE=pgvector never breaks a run."""
+    if config.vector_store() == "pgvector" and config.database_url():
+        try:
+            store = PgVectorStore(namespace=namespace)
+            store._ensure()  # connect + create extension/table now; failure → fallback
+            return store
+        except Exception as e:  # pragma: no cover - exercised only with a real DB
+            logger.warning("PgVectorStore no disponible (%s); usando memoria.", e)
+    return MemoryVectorStore()
+
+
 def _openai_embed(texts: list[str]) -> list[list[float]]:
     """Embed texts with the configured OpenAI embedding model; records cost."""
     from openai import OpenAI
@@ -205,11 +337,12 @@ class EmbeddingRetriever:
 
     name = "embeddings"
 
-    def __init__(self, embed_fn=None, cache: _EmbedCache | None = None) -> None:
+    def __init__(self, embed_fn=None, cache: _EmbedCache | None = None,
+                 store: VectorStore | None = None) -> None:
         self._embed = embed_fn or _openai_embed
         self._cache = cache
-        self._chunks: list[Chunk] = []
-        self._vecs: list[list[float]] = []
+        self._store: VectorStore = store or MemoryVectorStore()
+        self._count = 0
 
     def add_chunks(self, path: str, chunks: list[tuple[int, str]]) -> None:
         blocks = [(s, t) for s, t in chunks if t.strip()]
@@ -231,26 +364,19 @@ class EmbeddingRetriever:
             if self._cache:
                 self._cache.put_many(zip(to_embed, fresh, strict=False))
                 self._cache.save()
-        for (s, t), v in zip(blocks, vecs, strict=True):
-            if v is not None:
-                self._chunks.append(Chunk(path, s, t))
-                self._vecs.append(v)
+        items = [(path, s, t, v) for (s, t), v in zip(blocks, vecs, strict=True) if v is not None]
+        if items:
+            self._store.add(items)
+            self._count += len(items)
 
     def add(self, path: str, content: str) -> None:
         self.add_chunks(path, symbol_chunks(content, os.path.splitext(path)[1].lower()))
 
     def query(self, q: str, k: int = 5) -> list[Hit]:
-        if not self._vecs:
+        if self._count == 0:  # nothing indexed → skip the embed call (no network/cost)
             return []
         qv = self._embed([q])[0]
-        scored: list[Hit] = []
-        for chunk, v in zip(self._chunks, self._vecs, strict=True):
-            score = _cosine(qv, v)
-            if score > 0:
-                snippet = "\n".join(chunk.text.splitlines()[:8])
-                scored.append(Hit(chunk.path, chunk.start_line, round(score, 4), snippet))
-        scored.sort(key=lambda h: h.score, reverse=True)
-        return scored[:k]
+        return self._store.search(qv, k)
 
 
 def make_retriever() -> Retriever:
@@ -259,7 +385,9 @@ def make_retriever() -> Retriever:
     if config.retrieval_backend() == "embeddings":
         if os.getenv("OPENAI_API_KEY"):
             try:
-                return EmbeddingRetriever(cache=_EmbedCache(config.project_root()))
+                root = config.project_root()
+                return EmbeddingRetriever(cache=_EmbedCache(root),
+                                          store=make_vector_store(_namespace(root)))
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning("EmbeddingRetriever no disponible (%s); usando TF-IDF.", e)
         else:
