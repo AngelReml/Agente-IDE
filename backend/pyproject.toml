@@ -18,6 +18,9 @@ ignore = [
     "B904",  # API handlers re-raise HTTPException from caught validation errors on
              # purpose; the exception chain is never sent to the client, so
              # `raise ... from e` adds noise. (Common FastAPI convention.)
+    "UP038", # `isinstance(x, (A, B))` is intentional — the `A | B` form is slower at
+             # runtime; ruff itself deprecated this rule. Kept off for determinism
+             # across ruff versions (the CI gate pins ruff, but be explicit).
 ]
 
 [tool.pytest.ini_options]

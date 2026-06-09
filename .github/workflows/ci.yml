@@ -16,7 +16,14 @@ jobs:
       - name: Install
         run: |
           python -m pip install --upgrade pip
-          pip install fastapi pydantic pytest ruff
+          # Install the REAL core deps (not a hand-picked subset) so tests run against
+          # a prod-faithful environment — e.g. importing `app.graph` needs langchain.
+          # requirements-platform.txt (postgres/redis/otel) is intentionally NOT
+          # installed: those paths are env-gated with safe fallbacks and unit-tested
+          # via fakes, so the core suite stays green and fast without them.
+          pip install -r backend/requirements.txt
+          # Pin ruff so the lint gate is deterministic (rule sets drift across versions).
+          pip install "ruff==0.6.9"
       - name: Lint (ruff — gate)
         run: ruff check backend/app   # full ruleset (E,F,W,I,UP,B) — baseline is clean, so this FAILS on any regression
       - name: Tests
